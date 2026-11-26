@@ -128,16 +128,43 @@ transactions, CSV/CAMT.053-import (hash-kolom staat al klaar), rapportages.
    (typeniveau), `Categorized` gebruikt `NonEmpty` (typeniveau); de expliciete
    `Inflow`-uitzondering staat hierboven beschreven.
 
-## 6. Open punten voor later (expliciet geparkeerd, niet vergeten)
+## 6. Open punten uit Fase 1 — nu beslist in §7, of bewust later
 
 - **`-Werror` in CI:** zodra `Db/`/`Api/` de in `package.yaml` opgenomen
   dependencies (`sqlite-simple`, `servant*`, `warp`, `lucid`, …) daadwerkelijk
   gebruiken, verdwijnen de huidige `-Wunused-packages`-warnings op de
   `library`-component. Schakel `-Werror` in CI pas in nadat dat is gebeurd (of
   voeg per-fase dependencies toe in plaats van alles nu al), anders faalt elke
-  CI-run op fase 1.
-- **On-budget/tracking-transfervalidatie** (zie §3) moet een echte
-  `DomainError` worden zodra de assembly-laag rekeningen kan opzoeken.
-- CI-pipeline (GitHub Actions: `stack build`/`test`/`hlint`/`ormolu --mode
-  check`) is nog niet opgezet.
-- Backup-strategie voor het SQLite-bestand is nog niet bepaald.
+  CI-run op fase 1. (Nu sowieso niet relevant: CI zelf is uitgesteld tot na de
+  MVP, zie §7.)
+- **On-budget/tracking-transfervalidatie** (zie §3): beslist in §7 — nu, in
+  Fase 2.
+- **CI-pipeline:** beslist in §7 — bewust *niet* nu, pas na de MVP (zie §4 voor
+  de scope-afbakening van die MVP).
+- **Backup-strategie** voor het SQLite-bestand: beslist in §7.
+
+## 7. Fase 2-beslissingen (Db-laag)
+
+Geïnterviewd voorafgaand aan Fase 2. Per punt de keuze en de reden.
+
+| Onderdeel | Keuze | Reden |
+|---|---|---|
+| Migratie-levering | Cabal `data-files` + `Paths_bucktracker` (`getDataFileName`) | Blijven losse, reviewbare `.sql`-bestanden; geen TemplateHaskell; cabal/stack installeert ze automatisch mee. |
+| Migratie-runner | Auto-apply bij opstarten, bijgehouden in een `schema_migrations`-tabel | Simpel voor een single-user app; geen apart commando om te onthouden of te vergeten. |
+| DB-connectiebeheer | Een echte connection pool (`resource-pool`) | Bewuste keuze tegen het "één connectie + lock"-advies in — zie toelichting onder de tabel. |
+| SQLite-pragmas | `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout` | Betere concurrency (relevant nu er een pool is), FK's worden echt afgedwongen, geen directe "database is locked"-fouten. |
+| `YearMonth`-opslag | Twee kolommen `year INTEGER, month INTEGER` | Geen parse-stap, triviaal te sorteren/filteren, 1-op-1 met `ymYear`/`ymMonth`. |
+| Verwijderen van rekeningen/categorieën | Soft-delete (`archived_at`/`closed`-kolom) | Historische transacties blijven kloppend; geen cascade-delete-gedoe. |
+| Transfer-validatie (on-budget/tracking) | Wordt nu een echte `DomainError`, in Fase 2 | De Db/repository-laag kan rekeningen opzoeken bij het opslaan van een transfer; voorkomt dat een inconsistente boekhouding ooit wordt opgeslagen. |
+| Config laden | Een config-library (`envparse`) | Gestructureerde validatie/foutmeldingen voor env vars, in plaats van handmatig `lookupEnv`. |
+| Db-teststrategie | Verse `:memory:`-connectie per test, migraties er telkens overheen | Volledige test-isolatie; iets meer overhead per test, maar geen kans dat tests elkaar beïnvloeden. |
+| CI-pipeline | **Niet nu** — pas opzetten na de MVP (zie §4) | Eerst de MVP afbouwen; CI komt erbij zodra er een stabiel geheel is om te bewaken. (Besluit herzien tijdens het Fase 2-interview: oorspronkelijk "nu", gewijzigd naar "na MVP".) |
+| Backup-strategie | SQLite's online backup API, vanuit de app zelf | Robuuster dan een losse bestandskopie, ook consistent tijdens gebruik; iets meer code dan een `.bak`-kopie. |
+
+**Implementatienotitie — DB-connectiebeheer:** een pool heeft op een
+single-user SQLite-db weinig voordeel voor *schrijven* (SQLite is sowieso
+single-writer), maar helpt wel bij gelijktijdige *lezers* (bv. meerdere
+open browsertabs/HTMX-requests) zonder dat elke request op een schrijvende
+transactie hoeft te wachten — vooral met WAL-mode, die lezers niet laat
+blokkeren door een actieve schrijver. `resource-pool` met een klein maximum
+(bv. 4-8 connecties) is de te gebruiken library in Fase 2.
