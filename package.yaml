@@ -1,0 +1,89 @@
+name:                bucktracker
+version:             0.1.0.0
+github:              "justintermaat/bucktracker"
+license:             MIT
+author:              "Justin Termaat"
+maintainer:          "justintermaat@gmail.com"
+copyright:           "2026 Justin Termaat"
+
+extra-source-files:
+- README.md
+- CHANGELOG.md
+
+synopsis:            Persoonlijke zero-based / envelope budget- en geldtracker
+category:            Finance
+
+description:         Please see the README on GitHub at <https://github.com/justintermaat/bucktracker#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- text
+- time
+
+language: GHC2021
+
+default-extensions:
+- OverloadedStrings
+- StrictData
+- DeriveGeneric
+- DataKinds
+- TypeOperators
+- DerivingStrategies
+- DerivingVia
+
+ghc-options:
+- -Wall
+- -Wcompat
+- -Widentities
+- -Wincomplete-record-updates
+- -Wincomplete-uni-patterns
+- -Wmissing-export-lists
+- -Wmissing-home-modules
+- -Wpartial-fields
+- -Wredundant-constraints
+- -Wunused-packages
+
+library:
+  source-dirs: src
+  # Fase 2/3 dependencies staan hier al klaar (zie DECISIONS.md §1 en §6):
+  # ze worden pas echt gebruikt zodra Db/ en Api/ geschreven zijn, tot die
+  # tijd geeft -Wunused-packages hier terecht een warning (geen -Werror lokaal).
+  dependencies:
+  - aeson
+  - bytestring
+  - containers
+  - lucid
+  - mtl
+  - servant
+  - servant-server
+  - sqlite-simple
+  - transformers
+  - uuid
+  - warp
+
+executables:
+  bucktracker-exe:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - bucktracker
+
+tests:
+  bucktracker-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    build-tools:
+    - hspec-discover:hspec-discover
+    dependencies:
+    - bucktracker
+    - hspec
+    - QuickCheck
+    - hspec-wai
