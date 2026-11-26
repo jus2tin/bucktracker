@@ -10,7 +10,7 @@ import Test.Hspec
 spec :: Spec
 spec =
   describe "createPool" $
-    it "maakt de ouder-directory van het db-pad aan als die nog niet bestaat" $ do
+    it "creates the parent directory of the db path if it doesn't exist yet" $ do
       tmpDir <- getTemporaryDirectory
       let nestedDir = tmpDir </> "bucktracker-pool-test-dir"
           dbPath = nestedDir </> "nested" </> "test.db"

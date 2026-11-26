@@ -10,21 +10,21 @@ import Test.QuickCheck
 spec :: Spec
 spec = do
   describe "mkCategoryGroup" $ do
-    it "wijst een lege naam af" $
+    it "rejects an empty name" $
       mkCategoryGroup (CategoryGroupId 1) "" `shouldBe` Left (EmptyName "category group")
 
-    it "accepteert elke niet-lege naam" $
+    it "accepts every non-empty name" $
       property $ \gid ->
-        case mkCategoryGroup gid "Vaste lasten" of
-          Right cg -> cgName cg == "Vaste lasten" && cgId cg == gid
+        case mkCategoryGroup gid "Fixed Costs" of
+          Right cg -> cgName cg == "Fixed Costs" && cgId cg == gid
           Left _   -> False
 
   describe "mkCategory" $ do
-    it "wijst een lege naam af" $
+    it "rejects an empty name" $
       mkCategory (CategoryId 1) (CategoryGroupId 1) "  " `shouldBe` Left (EmptyName "category")
 
-    it "hangt altijd aan exact de gegeven groep" $
+    it "always belongs to exactly the given group" $
       property $ \cid gid ->
-        case mkCategory cid gid "Boodschappen" of
+        case mkCategory cid gid "Groceries" of
           Right cat -> catGroupId cat == gid && catId cat == cid
           Left _    -> False

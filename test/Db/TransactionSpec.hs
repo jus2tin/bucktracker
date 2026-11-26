@@ -34,27 +34,27 @@ import Test.Hspec
 spec :: Spec
 spec = around withTestDb $
   describe "Db.Transaction" $ do
-    it "insertInflow rondt volledig (Inflow, geen categorie)" $ \conn -> do
-      acc <- insertAccount conn "Betaalrekening" Checking >>= expectRight
-      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salaris" Uncleared (cents 250000) Nothing
+    it "insertInflow round-trips fully (Inflow, no category)" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 250000) Nothing
       txCategorization tx `shouldBe` Inflow (cents 250000)
       found <- getTransaction conn (txId tx)
       found `shouldBe` Just tx
 
-    it "insertSpending met een split rondt volledig, inclusief regelvolgorde" $ \conn -> do
-      acc <- insertAccount conn "Betaalrekening" Checking >>= expectRight
-      group <- insertCategoryGroup conn "Boodschappen" >>= expectRight
-      cat1 <- insertCategory conn (cgId group) "Supermarkt" >>= expectRight
-      cat2 <- insertCategory conn (cgId group) "Drogist" >>= expectRight
+    it "insertSpending with a split round-trips fully, including line order" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      group <- insertCategoryGroup conn "Groceries" >>= expectRight
+      cat1 <- insertCategory conn (cgId group) "Supermarket" >>= expectRight
+      cat2 <- insertCategory conn (cgId group) "Drugstore" >>= expectRight
       let lines' = TransactionLine (catId cat1) (cents (-3000)) :| [TransactionLine (catId cat2) (cents (-500))]
-      tx <- insertSpending conn (accId acc) (fromGregorian 2026 1 5) "Supermarkt" Uncleared lines' Nothing
+      tx <- insertSpending conn (accId acc) (fromGregorian 2026 1 5) "Supermarket" Uncleared lines' Nothing
       txCategorization tx `shouldBe` Categorized lines'
       found <- getTransaction conn (txId tx)
       found `shouldBe` Just tx
 
-    it "insertTransfer tussen twee on-budget rekeningen rondt volledig en sommeert naar 0" $ \conn -> do
-      from <- insertAccount conn "Betaalrekening" Checking >>= expectRight
-      to <- insertAccount conn "Spaarrekening" Checking >>= expectRight
+    it "insertTransfer between two on-budget accounts round-trips fully and sums to 0" $ \conn -> do
+      from <- insertAccount conn "Checking Account" Checking >>= expectRight
+      to <- insertAccount conn "Savings Account" Checking >>= expectRight
       (legFrom, legTo) <-
         insertTransfer conn (accId from, accId to) (fromGregorian 2026 1 10) Uncleared (cents 10000)
           >>= expectRight
@@ -64,16 +64,16 @@ spec = around withTestDb $
       foundFrom `shouldBe` Just legFrom
       foundTo `shouldBe` Just legTo
 
-    it "insertTransfer naar dezelfde rekening wijst af, zonder rijen toe te voegen" $ \conn -> do
-      acc <- insertAccount conn "Betaalrekening" Checking >>= expectRight
+    it "insertTransfer to the same account is rejected, without adding rows" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
       result <- insertTransfer conn (accId acc, accId acc) (fromGregorian 2026 1 10) Uncleared (cents 1000)
       result `shouldBe` Left TransferRequiresDistinctAccounts
       existing <- listTransactionsForAccount conn (accId acc)
       existing `shouldBe` []
 
-    it "insertTransfer tussen on-budget en tracking wijst af (v0.1-beperking, DECISIONS.md §3/§7)" $ \conn -> do
-      onBudget <- insertAccount conn "Betaalrekening" Checking >>= expectRight
-      tracking <- insertAccount conn "Beleggingen" Tracking >>= expectRight
+    it "insertTransfer between on-budget and tracking is rejected (v0.1 limitation, DECISIONS.md §3/§7)" $ \conn -> do
+      onBudget <- insertAccount conn "Checking Account" Checking >>= expectRight
+      tracking <- insertAccount conn "Investments" Tracking >>= expectRight
       result <-
         insertTransfer conn (accId onBudget, accId tracking) (fromGregorian 2026 1 10) Uncleared (cents 1000)
       result `shouldBe` Left TransferRequiresMatchingBudgetStatus
@@ -82,12 +82,12 @@ spec = around withTestDb $
       existingOnBudget `shouldBe` []
       existingTracking `shouldBe` []
 
-    it "listTransactionsInMonth filtert correct op maandgrenzen" $ \conn -> do
-      acc <- insertAccount conn "Betaalrekening" Checking >>= expectRight
-      _ <- insertInflow conn (accId acc) (fromGregorian 2026 1 31) "Voor" Uncleared (cents 100) Nothing
-      inMonth1 <- insertInflow conn (accId acc) (fromGregorian 2026 2 1) "Begin" Uncleared (cents 200) Nothing
-      inMonth2 <- insertInflow conn (accId acc) (fromGregorian 2026 2 28) "Eind" Uncleared (cents 300) Nothing
-      _ <- insertInflow conn (accId acc) (fromGregorian 2026 3 1) "Na" Uncleared (cents 400) Nothing
+    it "listTransactionsInMonth filters correctly at month boundaries" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      _ <- insertInflow conn (accId acc) (fromGregorian 2026 1 31) "Before" Uncleared (cents 100) Nothing
+      inMonth1 <- insertInflow conn (accId acc) (fromGregorian 2026 2 1) "Start" Uncleared (cents 200) Nothing
+      inMonth2 <- insertInflow conn (accId acc) (fromGregorian 2026 2 28) "End" Uncleared (cents 300) Nothing
+      _ <- insertInflow conn (accId acc) (fromGregorian 2026 3 1) "After" Uncleared (cents 400) Nothing
       february <- expectRight (mkYearMonth 2026 2)
       results <- listTransactionsInMonth conn february
       map txId results `shouldBe` [txId inMonth1, txId inMonth2]

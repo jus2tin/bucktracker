@@ -11,29 +11,29 @@ import Test.Hspec.Wai
 spec :: Spec
 spec = with withTestApp $ do
   describe "GET /" $
-    it "stuurt door naar /accounts" $ do
+    it "redirects to /accounts" $ do
       response <- get "/"
       liftIO (response `shouldSatisfy` ((== Just "/accounts") . lookup hLocation . simpleHeaders))
 
   describe "GET /accounts" $
-    it "toont een lege tabel zolang er geen rekeningen zijn" $
+    it "shows an empty table as long as there are no accounts" $
       get "/accounts" `shouldRespondWith` 200
 
   describe "POST /accounts" $ do
-    it "maakt een rekening aan en toont 'm in de tabel" $ do
-      response <- postHtmlForm "/accounts" [("name", "Betaalrekening"), ("accountType", "checking")]
-      liftIO (bodyContains "Betaalrekening" response `shouldBe` True)
+    it "creates an account and shows it in the table" $ do
+      response <- postHtmlForm "/accounts" [("name", "Checking Account"), ("accountType", "checking")]
+      liftIO (bodyContains "Checking Account" response `shouldBe` True)
 
-    it "wijst een lege naam af met een foutmelding, zonder een rij toe te voegen" $ do
+    it "rejects an empty name with an error message, without adding a row" $ do
       response <- postHtmlForm "/accounts" [("name", ""), ("accountType", "checking")]
-      liftIO (bodyContains "Naam mag niet leeg zijn" response `shouldBe` True)
+      liftIO (bodyContains "Name must not be empty" response `shouldBe` True)
 
   describe "POST /accounts/:id/archive" $
-    it "archiveert de rekening: de knop verdwijnt, de status verandert" $ do
-      _ <- postHtmlForm "/accounts" [("name", "Oude rekening"), ("accountType", "cash")]
+    it "archives the account: the button disappears, the status changes" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Old Account"), ("accountType", "cash")]
       response <- postHtmlForm "/accounts/1/archive" []
-      liftIO (bodyContains "Gearchiveerd" response `shouldBe` True)
-      liftIO (bodyContains "Archiveer<" response `shouldBe` False)
+      liftIO (bodyContains "Archived" response `shouldBe` True)
+      liftIO (bodyContains "Archive<" response `shouldBe` False)
 
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody

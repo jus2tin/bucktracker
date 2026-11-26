@@ -1,17 +1,17 @@
--- | Test-helper, geen *Spec.hs. Bouwt een echte 'Application' op een
--- vers, tijdelijk, bestands-backed SQLite-db.
+-- | Test helper, not a *Spec.hs. Builds a real 'Application' on a
+-- fresh, temporary, file-backed SQLite db.
 --
--- Bewust geen @:memory:@ hier (anders dan 'Db.Setup.withTestDb'): de
--- Api-laag gaat via 'Db.Pool', en @:memory:@ is per connectie een eigen
--- lege database — met een pool van meer dan één connectie zouden
--- requests dus soms een "andere" database zien. Een tijdelijk bestand is
--- precies wat de pool in productie ook gebruikt.
+-- Deliberately no @:memory:@ here (unlike 'Db.Setup.withTestDb'): the
+-- Api layer goes through 'Db.Pool', and @:memory:@ is its own empty
+-- database per connection — with a pool of more than one connection,
+-- requests could therefore sometimes see a "different" database. A
+-- temp file is exactly what the pool uses in production too.
 --
--- Geen cleanup van pool/bestand na gebruik: 'Test.Hspec.Wai.with' roept
--- dit per test opnieuw aan voor een verse, geïsoleerde 'Application'; de
--- pool netjes afsluiten zou zijn levensduur aan die call-semantiek moeten
--- koppelen (fragiel), en het is een kortlevend testproces — de OS-temp-map
--- ruimt zichzelf toch op.
+-- No cleanup of the pool/file after use: 'Test.Hspec.Wai.with' calls
+-- this again per test for a fresh, isolated 'Application'; cleanly
+-- shutting down the pool would have to tie its lifetime to that call
+-- semantics (fragile), and this is a short-lived test process anyway —
+-- the OS temp directory cleans itself up regardless.
 module Api.Setup
   ( withTestApp
   ) where

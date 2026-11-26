@@ -1,5 +1,6 @@
--- | Test-helper, geen *Spec.hs — hspec-discover pikt dit dus niet op als
--- een losse test, alleen als import vanuit de echte Db.*Spec-modules.
+-- | Test helper, not a *Spec.hs — hspec-discover therefore doesn't pick
+-- this up as a standalone test, only as an import from the real
+-- Db.*Spec modules.
 module Db.Setup
   ( withTestDb
   , expectRight
@@ -10,9 +11,9 @@ import Database.SQLite.Simple (Connection, close, execute_, open)
 import Db.Migrations (runMigrations)
 import Test.Hspec (expectationFailure)
 
--- | Een verse @:memory:@-connectie, migraties er al overheen gedraaid
--- (DECISIONS.md §7: "verse :memory:-connectie per test") — gebruik dit met
--- hspec's 'Test.Hspec.around'.
+-- | A fresh @:memory:@ connection, with migrations already run over it
+-- (DECISIONS.md §7: "a fresh :memory: connection per test") — use this
+-- with hspec's 'Test.Hspec.around'.
 withTestDb :: (Connection -> IO a) -> IO a
 withTestDb = bracket openTestConnection close
 
@@ -23,11 +24,10 @@ openTestConnection = do
   runMigrations conn
   pure conn
 
--- | Ontleedt een @Either e a@ zonder een partial pattern (@Right x <-@) in
--- de tests: bij 'Left' faalt de test met een nette boodschap i.p.v. een
--- cryptische pattern-match-exceptie. De 'error' hierna is bewust
--- onbereikbaar — 'expectationFailure' gooit altijd een exceptie — en
--- bestaat alleen om het als @IO a@ te laten typechecken.
+-- | Unwraps an @Either e a@ without a partial pattern (@Right x <-@) in
+-- the tests: on 'Left', the test fails with a decent message instead of
+-- a cryptic pattern-match exception. The 'error' afterward is
+-- deliberately unreachable — 'expectationFailure' always throws — and
+-- exists only to make it typecheck as @IO a@.
 expectRight :: Show e => Either e a -> IO a
 expectRight = either (\e -> expectationFailure (show e) >> error "unreachable") pure
-
