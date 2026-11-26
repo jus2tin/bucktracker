@@ -3,32 +3,46 @@ module Domain.Category
   , mkCategoryGroup
   , Category (..)
   , mkCategory
+  , isArchivedGroup
+  , isArchivedCategory
   ) where
 
 import Data.Text (Text)
-import qualified Data.Text as Text
-import Domain.Error (DomainError (..))
+import Data.Time (UTCTime)
+import Domain.Error (DomainError)
 import Domain.Types (CategoryGroupId, CategoryId)
+import Domain.Validation (nonEmptyName)
 
+-- | 'cgArchivedAt': soft-delete (DECISIONS.md §7), net als bij 'Domain.Account.Account'.
 data CategoryGroup = CategoryGroup
-  { cgId   :: CategoryGroupId
-  , cgName :: Text
+  { cgId         :: CategoryGroupId
+  , cgName       :: Text
+  , cgArchivedAt :: Maybe UTCTime
   } deriving stock (Eq, Show)
 
 mkCategoryGroup :: CategoryGroupId -> Text -> Either DomainError CategoryGroup
-mkCategoryGroup gid name
-  | Text.null (Text.strip name) = Left (EmptyName "category group")
-  | otherwise = Right (CategoryGroup gid name)
+mkCategoryGroup gid name =
+  (\n -> CategoryGroup gid n Nothing) <$> nonEmptyName "category group" name
+
+isArchivedGroup :: CategoryGroup -> Bool
+isArchivedGroup cg = case cgArchivedAt cg of
+  Just _  -> True
+  Nothing -> False
 
 -- | Een categorie, altijd onderdeel van precies één 'CategoryGroup'
 -- (twee niveaus, zie DECISIONS.md §3).
 data Category = Category
-  { catId      :: CategoryId
-  , catGroupId :: CategoryGroupId
-  , catName    :: Text
+  { catId         :: CategoryId
+  , catGroupId    :: CategoryGroupId
+  , catName       :: Text
+  , catArchivedAt :: Maybe UTCTime
   } deriving stock (Eq, Show)
 
 mkCategory :: CategoryId -> CategoryGroupId -> Text -> Either DomainError Category
-mkCategory cid gid name
-  | Text.null (Text.strip name) = Left (EmptyName "category")
-  | otherwise = Right (Category cid gid name)
+mkCategory cid gid name =
+  (\n -> Category cid gid n Nothing) <$> nonEmptyName "category" name
+
+isArchivedCategory :: Category -> Bool
+isArchivedCategory cat = case catArchivedAt cat of
+  Just _  -> True
+  Nothing -> False
