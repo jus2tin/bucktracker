@@ -1,12 +1,12 @@
--- | 'FromField'/'ToField' instances die de Domain-newtypes aan SQLite-
--- kolommen koppelen.
+-- | 'FromField'/'ToField' instances that connect the Domain newtypes to
+-- SQLite columns.
 --
--- Dit zijn onvermijdelijk orphan instances (noch de klasse, noch de types
--- komen uit dit module) — bewust hier gebundeld in plaats van verspreid,
--- zodat de "brug" tussen domein en opslag op één plek staat. 'YearMonth'
--- heeft geen eigen instance: die wordt als twee kolommen (year, month)
--- opgeslagen (zie DECISIONS.md §7), vandaar 'yearMonthField' hieronder in
--- plaats van een 'FromField'/'ToField'-paar.
+-- These are unavoidably orphan instances (neither the class nor the
+-- types come from this module) — deliberately bundled here instead of
+-- scattered around, so the "bridge" between domain and storage lives in
+-- one place. 'YearMonth' doesn't get its own instance: it's stored as
+-- two columns (year, month) (see DECISIONS.md §7), hence
+-- 'yearMonthField' below instead of a 'FromField'/'ToField' pair.
 module Db.Field
   ( yearMonthField
   ) where
@@ -26,7 +26,7 @@ import Database.SQLite.Simple.Ok (Ok (Errors, Ok))
 import Database.SQLite.Simple.ToField (ToField (..))
 import Domain.Types
 
--- * ID's en geldbedragen: simpele newtype-wrappers rond een al ondersteund type.
+-- * IDs and money amounts: simple newtype wrappers around an already-supported type.
 
 instance ToField AccountId where
   toField (AccountId i) = toField i
@@ -70,8 +70,11 @@ instance ToField Cents where
 instance FromField Cents where
   fromField f = cents <$> fromField f
 
--- * Enums, als TEXT (leesbaar in een DB-browser, en de SQL CHECK-
--- constraints in de migraties leggen dezelfde geldige waarden vast).
+-- * Enums, as TEXT (readable in a DB browser, and the SQL CHECK
+-- constraints in the migrations pin down the same valid values). The
+-- text <-> value mapping itself lives in Domain.Types (canonical, also
+-- used by the Api layer for form values) — this is just the connection
+-- to FromField/ToField.
 
 instance ToField AccountType where
   toField = SQLText . accountTypeToText
@@ -79,37 +82,13 @@ instance ToField AccountType where
 instance FromField AccountType where
   fromField = parseTextField "AccountType" accountTypeFromText
 
-accountTypeToText :: AccountType -> Text.Text
-accountTypeToText Checking = "checking"
-accountTypeToText Savings  = "savings"
-accountTypeToText Cash     = "cash"
-accountTypeToText Tracking = "tracking"
-
-accountTypeFromText :: Text.Text -> Maybe AccountType
-accountTypeFromText "checking" = Just Checking
-accountTypeFromText "savings"  = Just Savings
-accountTypeFromText "cash"     = Just Cash
-accountTypeFromText "tracking" = Just Tracking
-accountTypeFromText _          = Nothing
-
 instance ToField TransactionStatus where
   toField = SQLText . transactionStatusToText
 
 instance FromField TransactionStatus where
   fromField = parseTextField "TransactionStatus" transactionStatusFromText
 
-transactionStatusToText :: TransactionStatus -> Text.Text
-transactionStatusToText Uncleared  = "uncleared"
-transactionStatusToText Cleared    = "cleared"
-transactionStatusToText Reconciled = "reconciled"
-
-transactionStatusFromText :: Text.Text -> Maybe TransactionStatus
-transactionStatusFromText "uncleared"  = Just Uncleared
-transactionStatusFromText "cleared"    = Just Cleared
-transactionStatusFromText "reconciled" = Just Reconciled
-transactionStatusFromText _            = Nothing
-
--- | Gedeelde helper voor "TEXT-kolom met een vaste set geldige waarden".
+-- | Shared helper for "TEXT column with a fixed set of valid values".
 parseTextField :: Typeable a => String -> (Text.Text -> Maybe a) -> Field -> Ok a
 parseTextField typeName fromText f = case fieldData f of
   SQLText t -> case fromText t of
@@ -117,18 +96,19 @@ parseTextField typeName fromText f = case fieldData f of
     Nothing -> returnError ConversionFailed f ("unknown " ++ typeName ++ ": " ++ Text.unpack t)
   _ -> returnError Incompatible f ("expected a text column for " ++ typeName)
 
--- 'Day' en 'UTCTime' hebben al een 'FromField'/'ToField' in sqlite-simple
--- zelf (als TEXT, "YYYY-MM-DD" resp. ISO8601-achtig, dus sorteerbaar en
--- consistent met onze eigen TEXT-kolommen) — geen eigen instance nodig.
+-- 'Day' and 'UTCTime' already have a 'FromField'/'ToField' in
+-- sqlite-simple itself (as TEXT, "YYYY-MM-DD" resp. ISO8601-ish, so
+-- sortable and consistent with our own TEXT columns) — no instance of
+-- our own needed.
 
--- | 'YearMonth' leest zichzelf uit de *twee* kolommen die onmiddellijk op
--- deze positie in de rij staan (year, month) — gebruik dit in plaats van
--- 'field' op de plek waar een 'YearMonth' in een 'FromRow'-instance hoort.
+-- | 'YearMonth' reads itself from the *two* columns immediately at this
+-- position in the row (year, month) — use this instead of 'field' at
+-- the spot where a 'YearMonth' belongs in a 'FromRow' instance.
 --
--- 'RowParser' heeft geen 'MonadFail' om een ongeldige combinatie te
--- melden; in plaats daarvan valideert de maand via een eigen
--- 'FieldParser' (dezelfde foutmelding-machinerie als een gewone
--- 'FromField'-instance), met het jaar als vrije variabele erin.
+-- 'RowParser' has no 'MonadFail' to report an invalid combination with;
+-- instead, the month gets validated via its own 'FieldParser' (the same
+-- error-reporting machinery as a normal 'FromField' instance), with the
+-- year as a free variable in it.
 yearMonthField :: RowParser YearMonth
 yearMonthField = do
   y <- field

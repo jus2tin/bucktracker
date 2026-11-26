@@ -14,15 +14,15 @@ import Test.Hspec
 spec :: Spec
 spec = around withTestDb $
   describe "Db.Backup" $
-    it "kopieert de huidige database naar een ander bestand (online backup API)" $ \conn -> do
-      acc <- insertAccount conn "Betaalrekening" Checking >>= expectRight
+    it "copies the current database to another file (online backup API)" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
       withTempFile $ \destPath -> do
         backupTo conn destPath
         bracket (open destPath) close $ \destConn -> do
           found <- getAccount destConn (accId acc)
           fmap accName found `shouldBe` Just (accName acc)
 
--- | Een leeg, gegarandeerd uniek bestandspad, opgeruimd na gebruik.
+-- | An empty, guaranteed-unique file path, cleaned up after use.
 withTempFile :: (FilePath -> IO a) -> IO a
 withTempFile action = do
   tmpDir <- getTemporaryDirectory

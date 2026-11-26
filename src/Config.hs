@@ -1,9 +1,9 @@
--- | Applicatieconfiguratie, geladen uit environment-variabelen.
+-- | Application configuration, loaded from environment variables.
 --
--- Zie DECISIONS.md §7: 'envparse' voor gestructureerde validatie/
--- foutmeldingen, met een platform-onafhankelijk standaard DB-pad via de
--- XDG-datadirectory (op Windows %APPDATA%\bucktracker\, op Linux
--- doorgaans ~/.local/share/bucktracker/).
+-- See DECISIONS.md §7: 'envparse' for structured validation/error
+-- messages, with a platform-independent default DB path via the XDG
+-- data directory (on Windows %APPDATA%\bucktracker\, on Linux usually
+-- ~/.local/share/bucktracker/).
 module Config
   ( Config (..)
   , loadConfig
@@ -18,17 +18,17 @@ data Config = Config
   , configDbPath :: FilePath
   } deriving stock (Eq, Show)
 
--- | Leest BUCKTRACKER_PORT en BUCKTRACKER_DB_PATH; print bruikbare hulp en
--- stopt het proces als een variabele ontbreekt/ongeldig is (het gedrag van
--- 'Env.parse'). Beide hebben een default, dus in de praktijk start de app
--- zonder dat er iets gezet moet worden.
+-- | Reads BUCKTRACKER_PORT and BUCKTRACKER_DB_PATH; prints usable help
+-- and stops the process if a variable is missing/invalid (the behavior
+-- of 'Env.parse'). Both have a default, so in practice the app starts
+-- without anything needing to be set.
 loadConfig :: IO Config
 loadConfig = do
   dbPathDefault <- defaultDbPath
   Env.parse (header "bucktracker") $
     Config
-      <$> var auto "BUCKTRACKER_PORT" (def 8080 <> help "HTTP-poort voor de Warp-server")
-      <*> var str "BUCKTRACKER_DB_PATH" (def dbPathDefault <> help "Pad naar het SQLite-databasebestand")
+      <$> var auto "BUCKTRACKER_PORT" (def 8080 <> help "HTTP port for the Warp server")
+      <*> var str "BUCKTRACKER_DB_PATH" (def dbPathDefault <> help "Path to the SQLite database file")
 
 defaultDbPath :: IO FilePath
 defaultDbPath = do

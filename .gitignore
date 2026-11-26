@@ -37,12 +37,24 @@ TAGS
 .DS_Store
 Thumbs.db
 
-# Local runtime data / config — nooit de echte DB of secrets committen.
-# (default pad is buiten de repo, %APPDATA%\bucktracker\, maar voor de
-# zekerheid: negeer ook lokale DB-bestanden/.env als die per ongeluk in de
-# projectmap belanden, bv. tijdens handmatig testen van de Db/-laag.)
+# Local runtime data / config — never commit the real DB or secrets.
+# (the default path is outside the repo, %APPDATA%\bucktracker\, but just
+# in case: also ignore local DB files/.env if they accidentally end up in
+# the project directory, e.g. during manual testing of the Db/ layer.)
 *.sqlite
 *.sqlite3
 *.db
+
+# SQLite WAL sidecar files — created alongside *.db/*.sqlite* above as
+# soon as journal_mode=WAL is active (Db.Pool), so they'd otherwise slip
+# through the plain *.db/*.sqlite* patterns and could leak local
+# financial data into a commit.
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+
 .env
 .env.*

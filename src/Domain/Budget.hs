@@ -33,41 +33,41 @@ import Domain.Types
   , zeroCents
   )
 
--- | Hoeveel geld deze maand aan een categorie is toegewezen. Dit is een
--- budget-invoer van de gebruiker, geen transactie.
+-- | How much money has been assigned to a category this month. This is
+-- a user budget entry, not a transaction.
 data Assignment = Assignment
   { asgCategory :: CategoryId
   , asgMonth    :: YearMonth
   , asgAmount   :: Cents
   } deriving stock (Eq, Show)
 
--- | De volledige staat van één categorie in één maand.
+-- | The full state of one category in one month.
 data CategoryMonth = CategoryMonth
   { cmCategory  :: CategoryId
   , cmMonth     :: YearMonth
-  , cmAssigned  :: Cents -- ^ deze maand toegewezen
-  , cmActivity  :: Cents -- ^ som van transactieregels deze maand, al ondertekend
-  , cmCarriedIn :: Cents -- ^ meegebracht vanuit de vorige maand, altijd >= 0
+  , cmAssigned  :: Cents -- ^ assigned this month
+  , cmActivity  :: Cents -- ^ sum of transaction lines this month, already signed
+  , cmCarriedIn :: Cents -- ^ carried over from the previous month, always >= 0
   } deriving stock (Eq, Show)
 
--- | Invariant 4: beschikbaar saldo = meegebracht + toegewezen + activiteit.
--- "Activiteit" is hier al ondertekend (uitgaven negatief), dus deze ene
--- optelling is equivalent aan "... − uitgaven" met uitgaven als positief
--- bedrag; zie DECISIONS.md §5.
+-- | Invariant 4: available balance = carried in + assigned + activity.
+-- "Activity" here is already signed (expenses negative), so this single
+-- addition is equivalent to "... − expenses" with expenses as a
+-- positive amount; see DECISIONS.md §5.
 available :: CategoryMonth -> Cents
 available cm = cmCarriedIn cm <> cmAssigned cm <> cmActivity cm
 
--- | Resultaat van de maandovergang voor één categorie.
+-- | Result of the month rollover for one category.
 data Rollover = Rollover
-  { rolloverCarry         :: Cents -- ^ naar volgende maand, altijd >= 0
-  , rolloverRtaAdjustment :: Cents -- ^ impact op Ready to Assign, altijd <= 0
+  { rolloverCarry         :: Cents -- ^ into the next month, always >= 0
+  , rolloverRtaAdjustment :: Cents -- ^ impact on Ready to Assign, always <= 0
   } deriving stock (Eq, Show)
 
--- | De YNAB-maandovergang: een niet-negatief saldo rolt door, een negatief
--- saldo (overbesteding) reset de categorie naar 0 en het hele tekort wordt
--- afgetrokken van Ready to Assign. Geld gaat hierbij nooit verloren of
--- wordt gecreëerd: @rolloverCarry r \<\> rolloverRtaAdjustment r ==
--- available cm@ geldt voor elke 'CategoryMonth' (hard getest in
+-- | The YNAB month rollover: a non-negative balance carries forward, a
+-- negative balance (overspending) resets the category to 0 and the
+-- whole shortfall is deducted from Ready to Assign. No money is ever
+-- lost or created here: @rolloverCarry r \<\> rolloverRtaAdjustment r ==
+-- available cm@ holds for every 'CategoryMonth' (hard-tested in
 -- @BudgetSpec@).
 rolloverCategoryMonth :: CategoryMonth -> Rollover
 rolloverCategoryMonth cm
@@ -76,82 +76,93 @@ rolloverCategoryMonth cm
   where
     avail = available cm
 
--- | Wat de volgende maand als 'cmCarriedIn' voor deze categorie meekrijgt.
+-- | What the next month gets as 'cmCarriedIn' for this category.
 nextCarriedIn :: CategoryMonth -> Cents
 nextCarriedIn = rolloverCarry . rolloverCategoryMonth
 
--- | Som van de transactieregels voor één categorie, in één maand.
-categoryActivity :: CategoryId -> YearMonth -> [Transaction] -> Cents
-categoryActivity cid month txs = mconcat
+-- | Sum of the transaction lines for one category, in one month.
+--
+-- Takes @accounts@ purely as defense-in-depth: 'Db.Transaction.insertSpending'
+-- already rejects a 'Categorized' transaction on a non-on-budget account
+-- before it's ever persisted, but this function has no way to know
+-- that's true of its @txs@ argument — a future caller assembling @txs@
+-- some other way shouldn't be able to silently break invariant 1 just by
+-- including a tracking account's transactions. Mirrors 'accountInflows'.
+categoryActivity :: [Account] -> CategoryId -> YearMonth -> [Transaction] -> Cents
+categoryActivity accounts cid month txs = mconcat
   [ tlAmount l
   | tx <- txs
   , dayToYearMonth (txDate tx) == month
+  , isOnBudgetAccountIn accounts (txAccount tx)
   , Categorized ls <- [txCategorization tx]
   , l <- toList ls
   , tlCategory l == cid
   ]
 
--- | Bouw de 'CategoryMonth' voor één categorie uit de ruwe boekhouding
--- (toewijzingen + transacties). @carriedIn@ komt van de vorige maand
--- ('nextCarriedIn' op de vorige 'CategoryMonth'), of is 'zeroCents' voor de
--- allereerste maand.
+-- | Build the 'CategoryMonth' for one category from the raw ledger
+-- (assignments + transactions). @carriedIn@ comes from the previous
+-- month ('nextCarriedIn' on the previous 'CategoryMonth'), or is
+-- 'zeroCents' for the very first month.
 buildCategoryMonth
-  :: CategoryId -> YearMonth -> Cents -> [Assignment] -> [Transaction] -> CategoryMonth
-buildCategoryMonth cid month carriedIn assignments txs = CategoryMonth
+  :: [Account] -> CategoryId -> YearMonth -> Cents -> [Assignment] -> [Transaction] -> CategoryMonth
+buildCategoryMonth accounts cid month carriedIn assignments txs = CategoryMonth
   { cmCategory  = cid
   , cmMonth     = month
   , cmAssigned  = mconcat
       [ asgAmount a | a <- assignments, asgCategory a == cid, asgMonth a == month ]
-  , cmActivity  = categoryActivity cid month txs
+  , cmActivity  = categoryActivity accounts cid month txs
   , cmCarriedIn = carriedIn
   }
 
--- | Som van alle 'Inflow'-transacties op on-budget rekeningen in een
--- maand: dit is het geld dat deze maand instroomt in Ready to Assign.
--- Inflows op tracking-rekeningen tellen bewust niet mee (ze horen niet bij
--- het budget) — net als hun rekeningsaldo buiten 'onBudgetBalanceTotal'
--- valt.
+-- | Sum of all 'Inflow' transactions on on-budget accounts in a month:
+-- this is the money flowing into Ready to Assign this month. Inflows on
+-- tracking accounts deliberately don't count (they're not part of the
+-- budget) — just like their account balance falls outside
+-- 'onBudgetBalanceTotal'.
 accountInflows :: [Account] -> YearMonth -> [Transaction] -> Cents
 accountInflows accounts month txs = mconcat
   [ amount
   | tx <- txs
   , dayToYearMonth (txDate tx) == month
   , Inflow amount <- [txCategorization tx]
-  , isOnBudgetAccount (txAccount tx)
+  , isOnBudgetAccountIn accounts (txAccount tx)
   ]
-  where
-    isOnBudgetAccount aid = any (\a -> accId a == aid && isOnBudget a) accounts
 
--- | Saldo van één rekening: som van alle transactiebedragen erop.
+-- | Shared by 'accountInflows' and 'categoryActivity'.
+isOnBudgetAccountIn :: [Account] -> AccountId -> Bool
+isOnBudgetAccountIn accounts aid = any (\a -> accId a == aid && isOnBudget a) accounts
+
+-- | Balance of one account: sum of all transaction amounts on it.
 accountBalance :: AccountId -> [Transaction] -> Cents
 accountBalance aid txs = mconcat
   [ transactionAmount tx | tx <- txs, txAccount tx == aid ]
 
--- | Som van de saldi van alle on-budget rekeningen — de linkerkant van
--- invariant 1.
+-- | Sum of the balances of all on-budget accounts — the left-hand side
+-- of invariant 1.
 onBudgetBalanceTotal :: [Account] -> [Transaction] -> Cents
 onBudgetBalanceTotal accounts txs = mconcat
   [ accountBalance (accId a) txs | a <- accounts, isOnBudget a ]
 
--- | Totaal toegewezen aan alle categorieën in een maand.
+-- | Total assigned to all categories in a month.
 assignedTotal :: YearMonth -> [Assignment] -> Cents
 assignedTotal month assignments = mconcat
   [ asgAmount a | a <- assignments, asgMonth a == month ]
 
--- | Ready to Assign aan het einde van een maand: wat er aan Ready to
--- Assign de maand binnenkwam, plus nieuwe inflows, minus alles wat deze
--- maand aan categorieën is toegewezen.
+-- | Ready to Assign at the end of a month: what came into Ready to
+-- Assign this month, plus new inflows, minus everything assigned to
+-- categories this month.
 readyToAssign
   :: Cents -> [Account] -> YearMonth -> [Assignment] -> [Transaction] -> Cents
 readyToAssign rtaCarriedIn accounts month assignments txs =
   rtaCarriedIn <> accountInflows accounts month txs <> negateCents (assignedTotal month assignments)
 
--- | Invariant 1: de som van de on-budget rekeningsaldi is altijd gelijk aan
--- de som van alle categoriesaldi plus Ready to Assign. Dit klopt zodra (a)
--- elke 'Categorized' transactie op een on-budget rekening staat en elke
--- categorie die in een regel voorkomt ook in @categoryMonths@ zit, en (b)
--- elke transfer twee on-budget (of twee tracking) rekeningen verbindt, nooit
--- gemengd — zie DECISIONS.md §3 voor de bekende v0.1-beperking hierachter.
+-- | Invariant 1: the sum of on-budget account balances always equals
+-- the sum of all category balances plus Ready to Assign. This holds as
+-- long as (a) every 'Categorized' transaction lives on an on-budget
+-- account and every category referenced by a line is also present in
+-- @categoryMonths@, and (b) every transfer connects two on-budget (or
+-- two tracking) accounts, never mixed — see DECISIONS.md §3 for the
+-- known v0.1 limitation behind this.
 budgetBalancesAccounts
   :: [Account] -> [CategoryMonth] -> Cents -> [Transaction] -> Bool
 budgetBalancesAccounts accounts categoryMonths rta txs =

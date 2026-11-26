@@ -1,10 +1,10 @@
--- | Gedeelde 'Arbitrary'-instances en generators voor de Domain-tests.
+-- | Shared 'Arbitrary' instances and generators for the Domain tests.
 --
--- Geen productiecode (orphan instances zijn hier bewust, zoals gebruikelijk
--- in testsuites), maar wel total: generators die kunnen "mislukken" (bv.
--- een smart constructor die een 'Either' teruggeeft) proberen het gewoon
--- opnieuw in plaats van te crashen — ze worden altijd met geldige invoer
--- aangeroepen, dus dat pad is onbereikbaar maar nooit onveilig.
+-- Not production code (orphan instances are deliberate here, as is
+-- customary in test suites), but still total: generators that could
+-- "fail" (e.g. a smart constructor returning an 'Either') simply retry
+-- instead of crashing — they're always called with valid input, so that
+-- path is unreachable but never unsafe.
 module Domain.Gen
   ( genCents
   , genYearMonth
@@ -32,10 +32,10 @@ import Domain.Transaction
 import Domain.Types
 import Test.QuickCheck
 
--- * Basistypes
+-- * Basic types
 
--- | Begrensd tot +/- 1.000.000,00 EUR zodat sommen over lijsten van
--- redelijke lengte nooit richting de grenzen van 'Data.Int.Int64' komen.
+-- | Bounded to +/- 1,000,000.00 EUR so sums over lists of reasonable
+-- length never approach the limits of 'Data.Int.Int64'.
 genCents :: Gen Cents
 genCents = cents <$> choose (-100000000, 100000000)
 
@@ -54,23 +54,23 @@ genYearMonth = do
   m <- choose (1, 12)
   case mkYearMonth y m of
     Right ym -> pure ym
-    Left _   -> genYearMonth -- onbereikbaar: m zit al in [1,12]
+    Left _   -> genYearMonth -- unreachable: m is already in [1,12]
 
 instance Arbitrary YearMonth where
   arbitrary = genYearMonth
 
 genDayIn :: YearMonth -> Gen Day
 genDayIn ym = do
-  d <- choose (1, 28) -- 28: geldig in elke maand, geen kalenderrekenwerk nodig
+  d <- choose (1, 28) -- 28: valid in every month, no calendar arithmetic needed
   pure (fromGregorian (fromIntegral (ymYear ym)) (ymMonth ym) d)
 
 instance Arbitrary Day where
   arbitrary = genYearMonth >>= genDayIn
 
--- Kleine, bewust overlappende ranges: zo levert equality tussen twee
--- onafhankelijk gegenereerde ID's regelmatig zowel True als False op, wat
--- nodig is om filterlogica (bv. "alleen regels van déze categorie") goed
--- te testen.
+-- Small, deliberately overlapping ranges: this way, equality between
+-- two independently generated IDs regularly comes out both True and
+-- False, which is needed to properly test filtering logic (e.g. "only
+-- lines for *this* category").
 instance Arbitrary AccountId where
   arbitrary = AccountId <$> choose (1, 20)
 
@@ -97,9 +97,9 @@ instance Arbitrary Categorization where
       , TransferLeg <$> arbitrary <*> arbitrary <*> arbitrary
       ]
 
--- | Losse, op zichzelf staande transacties (geen wereld met kloppende
--- rekeningen/categorieën erbij) — bruikbaar voor structurele eigenschappen
--- zoals "een transactie raakt alleen zijn eigen rekening".
+-- | Standalone transactions on their own (no world with matching
+-- accounts/categories around them) — useful for structural properties
+-- such as "a transaction only ever touches its own account".
 instance Arbitrary Transaction where
   arbitrary =
     Transaction
@@ -114,19 +114,19 @@ instance Arbitrary Transaction where
 instance Arbitrary CategoryMonth where
   arbitrary = CategoryMonth <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
 
--- * Entiteiten via de echte smart constructors
+-- * Entities via the real smart constructors
 
 genAccount :: Int -> AccountType -> Gen Account
 genAccount n ty =
   case mkAccount (AccountId (fromIntegral n)) (Text.pack ("Account " ++ show n)) ty of
     Right acc -> pure acc
-    Left _    -> genAccount n ty -- onbereikbaar: de naam is nooit leeg
+    Left _    -> genAccount n ty -- unreachable: the name is never empty
 
 genCategory :: Int -> CategoryGroupId -> Gen Category
 genCategory n gid =
   case mkCategory (CategoryId (fromIntegral n)) gid (Text.pack ("Category " ++ show n)) of
     Right cat -> pure cat
-    Left _    -> genCategory n gid -- onbereikbaar: de naam is nooit leeg
+    Left _    -> genCategory n gid -- unreachable: the name is never empty
 
 genLine :: [Category] -> Gen TransactionLine
 genLine categories = do
@@ -142,7 +142,7 @@ genCategorizedTx month onBudgetAccs categories = do
   firstLine <- genLine categories
   extraCount <- choose (0, 2)
   extraLines <- vectorOf extraCount (genLine categories)
-  pure (mkSpendingTransaction (TransactionId 0) (accId acc) day "Boodschappen" status
+  pure (mkSpendingTransaction (TransactionId 0) (accId acc) day "Groceries" status
           (firstLine :| extraLines) Nothing)
 
 genInflowTx :: YearMonth -> [Account] -> Gen Transaction
@@ -151,7 +151,7 @@ genInflowTx month accounts = do
   day <- genDayIn month
   status <- arbitrary
   amt <- genCents
-  pure (mkInflowTransaction (TransactionId 0) (accId acc) day "Inkomen" status amt Nothing)
+  pure (mkInflowTransaction (TransactionId 0) (accId acc) day "Income" status amt Nothing)
 
 genDistinctPair :: [Account] -> Gen (Account, Account)
 genDistinctPair accs = do
@@ -159,9 +159,9 @@ genDistinctPair accs = do
   b <- elements accs
   if accId a == accId b then genDistinctPair accs else pure (a, b)
 
--- | Beide legs van een transfer, altijd tussen twee *verschillende*
--- on-budget rekeningen (zie DECISIONS.md §3 voor waarom een gemengde
--- on-budget/tracking-transfer hier bewust niet gegenereerd wordt).
+-- | Both legs of a transfer, always between two *different* on-budget
+-- accounts (see DECISIONS.md §3 for why a mixed on-budget/tracking
+-- transfer is deliberately not generated here).
 genTransferTxs :: YearMonth -> [Account] -> Gen [Transaction]
 genTransferTxs month onBudgetAccs = do
   (fromAcc, toAcc) <- genDistinctPair onBudgetAccs
@@ -171,17 +171,18 @@ genTransferTxs month onBudgetAccs = do
   case mkTransferPair (TransferId 0) (TransactionId 0, accId fromAcc) (TransactionId 0, accId toAcc)
          day status amt of
     Right (legA, legB) -> pure [legA, legB]
-    Left _             -> pure [] -- onbereikbaar: fromAcc /= toAcc gegarandeerd
+    Left _             -> pure [] -- unreachable: fromAcc /= toAcc is guaranteed
 
 genAssignmentFor :: YearMonth -> Category -> Gen Assignment
 genAssignmentFor month cat = Assignment (catId cat) month <$> genCents
 
--- * Een complete, interne-consistente boekhouding
+-- * A complete, internally consistent ledger
 
--- | Een "wereld": rekeningen, categorieën, toewijzingen en transacties die
--- intern consistent zijn (elke categorie/rekening die een transactie of
--- toewijzing noemt, bestaat ook echt) — nodig om de ledger-brede invariant
--- (invariant 1) zinvol te kunnen testen. Zie 'Domain.Budget.budgetBalancesAccounts'.
+-- | A "world": accounts, categories, assignments and transactions that
+-- are internally consistent (every category/account referenced by a
+-- transaction or assignment actually exists) — needed to meaningfully
+-- test the ledger-wide invariant (invariant 1). See
+-- 'Domain.Budget.budgetBalancesAccounts'.
 data World = World
   { wAccounts     :: [Account]
   , wCategories   :: [Category]

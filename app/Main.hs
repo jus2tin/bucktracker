@@ -1,24 +1,30 @@
 module Main (main) where
 
+import Api (application)
+import Api.Monad (AppEnv (AppEnv))
 import Config (Config (configDbPath, configPort), loadConfig)
 import Db.Pool (createPool)
+import Network.Wai.Handler.Warp (defaultSettings, runSettings, setHost, setPort)
 import System.IO (hSetEncoding, stderr, stdout, utf8)
 
--- | Laadt config en zet de SQLite-pool + migraties op (Fase 2). De
--- Warp-server (Fase 3, Api/) volgt nog niet — zie DECISIONS.md.
 main :: IO ()
 main = do
-  -- Zonder dit crasht de app op Windows zodra er een niet-ASCII teken
-  -- (em-dash, "é" in een categorienaam, ...) naar de console gaat: de
-  -- actieve codepage daar is zelden UTF-8, en de standaard-encoding van
-  -- stdout/stderr volgt die codepage.
+  -- Without this, the app crashes on Windows as soon as a non-ASCII
+  -- character (em-dash, "é" in a category name, ...) goes to the
+  -- console: the active codepage there is rarely UTF-8, and the default
+  -- encoding of stdout/stderr follows that codepage.
   hSetEncoding stdout utf8
   hSetEncoding stderr utf8
   config <- loadConfig
-  _pool <- createPool (configDbPath config)
-  putStrLn ("bucktracker: database gereed op " <> configDbPath config <> " (migraties toegepast).")
-  putStrLn
-    ( "Api/-laag volgt in Fase 3 — zou anders geluisterd hebben op poort "
-        <> show (configPort config)
-        <> "."
-    )
+  pool <- createPool (configDbPath config)
+  let env = AppEnv pool
+  putStrLn ("bucktracker: database ready at " <> configDbPath config <> " (migrations applied).")
+  putStrLn ("bucktracker: listening on http://localhost:" <> show (configPort config))
+  -- Warp's plain 'run' binds to every network interface (defaultSettings'
+  -- host is "*4" = 0.0.0.0), not just loopback. That silently contradicts
+  -- the no-auth assumption in CLAUDE.md/DECISIONS.md ("runs on localhost
+  -- only") — anyone on the same LAN/Wi-Fi could otherwise reach this.
+  -- Bind explicitly to loopback instead. Not exposed as an env var on
+  -- purpose: an app with no auth should not make it easy to accidentally
+  -- widen this.
+  runSettings (setHost "127.0.0.1" (setPort (configPort config) defaultSettings)) (application env)

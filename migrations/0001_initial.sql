@@ -1,14 +1,14 @@
--- Fase 2, migratie 1: het volledige v0.1-schema in één keer.
+-- Phase 2, migration 1: the full v0.1 schema in one go.
 --
--- Conventies (zie DECISIONS.md §7):
---   * Geld altijd als INTEGER (centen).
---   * YearMonth als twee kolommen (year, month), geen parse-stap nodig.
---   * Datums/timestamps als ISO8601-TEXT ("YYYY-MM-DD" / volledige timestamp),
---     sorteren daardoor correct als gewone tekst.
---   * Soft-delete via een nullable archived_at-timestamp; NULL = actief.
---   * CHECK-constraints spiegelen zoveel mogelijk de Haskell-somtypes
---     (Domain.Transaction.Categorization): een rij kan niet een vorm
---     aannemen die in de domeinlaag onrepresenteerbaar is.
+-- Conventions (see DECISIONS.md §7):
+--   * Money always as INTEGER (cents).
+--   * YearMonth as two columns (year, month), no parse step needed.
+--   * Dates/timestamps as ISO8601 TEXT ("YYYY-MM-DD" / full timestamp),
+--     which therefore sort correctly as plain text.
+--   * Soft delete via a nullable archived_at timestamp; NULL = active.
+--   * CHECK constraints mirror the Haskell sum types as closely as
+--     possible (Domain.Transaction.Categorization): a row can't take a
+--     shape that's unrepresentable in the domain layer.
 
 PRAGMA foreign_keys = ON;
 
@@ -34,9 +34,9 @@ CREATE TABLE categories (
 
 CREATE INDEX idx_categories_group_id ON categories (group_id);
 
--- Eén rij per transfer, puur om een TransferId te kunnen uitgeven die door
--- de twee transactie-legs gedeeld wordt (voorkomt een kip-ei-probleem met
--- de CHECK-constraint op transactions hieronder).
+-- One row per transfer, purely so we can issue a TransferId that's
+-- shared by the two transaction legs (avoids a chicken-and-egg problem
+-- with the CHECK constraint on transactions below).
 CREATE TABLE transfers (
     id         INTEGER PRIMARY KEY,
     created_at TEXT NOT NULL
@@ -49,9 +49,9 @@ CREATE TABLE transactions (
     payee                   TEXT NOT NULL,
     status                  TEXT NOT NULL CHECK (status IN ('uncleared', 'cleared', 'reconciled')),
     kind                    TEXT NOT NULL CHECK (kind IN ('categorized', 'inflow', 'transfer')),
-    -- Alleen gevuld voor kind = 'inflow' of 'transfer'; voor 'categorized'
-    -- volgt het bedrag uit de som van transaction_lines (zie
-    -- Domain.Transaction.transactionAmount).
+    -- Only filled in for kind = 'inflow' or 'transfer'; for
+    -- 'categorized', the amount follows from the sum of
+    -- transaction_lines (see Domain.Transaction.transactionAmount).
     amount                  INTEGER,
     transfer_id             INTEGER REFERENCES transfers (id),
     counterpart_account_id  INTEGER REFERENCES accounts (id),
@@ -77,8 +77,8 @@ CREATE TABLE transaction_lines (
 CREATE INDEX idx_transaction_lines_transaction_id ON transaction_lines (transaction_id);
 CREATE INDEX idx_transaction_lines_category_id ON transaction_lines (category_id);
 
--- Eén rij per (categorie, maand): "hoeveel is er deze maand aan deze
--- categorie toegewezen". Zie Domain.Budget.Assignment/assignedTotal.
+-- One row per (category, month): "how much has been assigned to this
+-- category this month". See Domain.Budget.Assignment/assignedTotal.
 CREATE TABLE assignments (
     id          INTEGER PRIMARY KEY,
     category_id INTEGER NOT NULL REFERENCES categories (id),

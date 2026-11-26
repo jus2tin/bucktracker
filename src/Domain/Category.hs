@@ -13,7 +13,7 @@ import Domain.Error (DomainError)
 import Domain.Types (CategoryGroupId, CategoryId)
 import Domain.Validation (nonEmptyName)
 
--- | 'cgArchivedAt': soft-delete (DECISIONS.md §7), net als bij 'Domain.Account.Account'.
+-- | 'cgArchivedAt': soft delete (DECISIONS.md §7), same as 'Domain.Account.Account'.
 data CategoryGroup = CategoryGroup
   { cgId         :: CategoryGroupId
   , cgName       :: Text
@@ -29,8 +29,8 @@ isArchivedGroup cg = case cgArchivedAt cg of
   Just _  -> True
   Nothing -> False
 
--- | Een categorie, altijd onderdeel van precies één 'CategoryGroup'
--- (twee niveaus, zie DECISIONS.md §3).
+-- | A category, always part of exactly one 'CategoryGroup' (two levels,
+-- see DECISIONS.md §3).
 data Category = Category
   { catId         :: CategoryId
   , catGroupId    :: CategoryGroupId

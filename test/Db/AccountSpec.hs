@@ -10,30 +10,30 @@ import Test.Hspec
 spec :: Spec
 spec = around withTestDb $
   describe "Db.Account" $ do
-    it "wijst een lege naam af zonder een rij toe te voegen" $ \conn -> do
+    it "rejects an empty name without adding a row" $ \conn -> do
       result <- insertAccount conn "   " Checking
       result `shouldBe` Left (EmptyName "account")
       accounts <- listAccounts conn
       accounts `shouldBe` []
 
-    it "rondt een geldige rekening volledig" $ \conn -> do
-      acc <- insertAccount conn "Betaalrekening" Checking >>= expectRight
-      accName acc `shouldBe` "Betaalrekening"
+    it "round-trips a valid account" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      accName acc `shouldBe` "Checking Account"
       accType acc `shouldBe` Checking
       isArchived acc `shouldBe` False
       found <- getAccount conn (accId acc)
       found `shouldBe` Just acc
 
-    it "listAccounts geeft alle rekeningen terug, op id gesorteerd" $ \conn -> do
+    it "listAccounts returns all accounts, sorted by id" $ \conn -> do
       a1 <- insertAccount conn "A" Checking >>= expectRight
       a2 <- insertAccount conn "B" Tracking >>= expectRight
       accounts <- listAccounts conn
       accounts `shouldBe` [a1, a2]
 
-    it "archiveAccount zet archived_at, en dat blijft bewaard bij opnieuw opvragen" $ \conn -> do
-      acc <- insertAccount conn "Oude rekening" Cash >>= expectRight
+    it "archiveAccount sets archived_at, which persists on re-fetch" $ \conn -> do
+      acc <- insertAccount conn "Old Account" Cash >>= expectRight
       archiveAccount conn (accId acc)
       maybeArchived <- getAccount conn (accId acc)
       case maybeArchived of
         Just archived -> isArchived archived `shouldBe` True
-        Nothing -> expectationFailure "account verdween na archiveAccount"
+        Nothing -> expectationFailure "account disappeared after archiveAccount"

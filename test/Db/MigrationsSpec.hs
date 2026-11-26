@@ -8,11 +8,11 @@ import Test.Hspec
 spec :: Spec
 spec = around withTestDb $
   describe "runMigrations" $ do
-    it "laat precies één toegepaste migratie achter" $ \conn -> do
+    it "leaves exactly one applied migration behind" $ \conn -> do
       rows <- query_ conn "SELECT filename FROM schema_migrations" :: IO [Only String]
       length rows `shouldBe` 1
 
-    it "is idempotent: een tweede keer draaien verandert niets en faalt niet" $ \conn -> do
-      runMigrations conn -- withTestDb draaide 'm al één keer; dit is de tweede keer
+    it "is idempotent: running it a second time changes nothing and doesn't fail" $ \conn -> do
+      runMigrations conn -- withTestDb already ran it once; this is the second time
       rows <- query_ conn "SELECT filename FROM schema_migrations" :: IO [Only String]
       length rows `shouldBe` 1

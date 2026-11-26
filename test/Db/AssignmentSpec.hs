@@ -11,18 +11,18 @@ import Test.Hspec
 spec :: Spec
 spec = around withTestDb $
   describe "Db.Assignment" $ do
-    it "rondt een toewijzing volledig" $ \conn -> do
-      group <- insertCategoryGroup conn "Vaste lasten" >>= expectRight
-      cat <- insertCategory conn (cgId group) "Huur" >>= expectRight
+    it "round-trips an assignment" $ \conn -> do
+      group <- insertCategoryGroup conn "Fixed Costs" >>= expectRight
+      cat <- insertCategory conn (cgId group) "Rent" >>= expectRight
       january <- expectRight (mkYearMonth 2026 1)
       setAssignment conn (catId cat) january (cents 90000)
       results <- listAssignmentsForMonth conn january
       map asgCategory results `shouldBe` [catId cat]
       map asgAmount results `shouldBe` [cents 90000]
 
-    it "is een upsert: opnieuw zetten overschrijft, voegt geen rij toe" $ \conn -> do
-      group <- insertCategoryGroup conn "Vaste lasten" >>= expectRight
-      cat <- insertCategory conn (cgId group) "Huur" >>= expectRight
+    it "is an upsert: setting it again overwrites, doesn't add a row" $ \conn -> do
+      group <- insertCategoryGroup conn "Fixed Costs" >>= expectRight
+      cat <- insertCategory conn (cgId group) "Rent" >>= expectRight
       january <- expectRight (mkYearMonth 2026 1)
       setAssignment conn (catId cat) january (cents 90000)
       setAssignment conn (catId cat) january (cents 95000)

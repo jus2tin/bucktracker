@@ -1,10 +1,10 @@
--- | Migratie-runner: past bij het opstarten automatisch alle nog niet
--- toegepaste @.sql@-bestanden uit @migrations/@ toe (zie DECISIONS.md §7).
+-- | Migration runner: on startup, automatically applies every not-yet-
+-- applied @.sql@ file from @migrations/@ (see DECISIONS.md §7).
 --
--- De bestanden zelf zijn cabal @data-files@; hun locatie op schijf komt van
--- het gegenereerde 'Paths_bucktracker'-module — dat werkt zowel in een
--- lokale @stack build@/@stack test@ (resolvet dan naar de map in de
--- checkout) als na een echte installatie, zonder TemplateHaskell.
+-- The files themselves are cabal @data-files@; their location on disk
+-- comes from the generated 'Paths_bucktracker' module — that works both
+-- in a local @stack build@/@stack test@ (resolves to the directory in
+-- the checkout then) and after a real install, with no TemplateHaskell.
 module Db.Migrations
   ( runMigrations
   ) where
@@ -30,21 +30,21 @@ import System.FilePath (takeExtension, (</>))
 
 import Paths_bucktracker (getDataDir)
 
--- | Maakt (indien nodig) de @schema_migrations@-tabel en past daarna elke
--- nog niet toegepaste migratie toe, in bestandsnaam-volgorde (vandaar de
--- genummerde prefixen zoals @0001_initial.sql@). Elke migratie draait in
--- haar eigen transactie: alles of niets per bestand.
+-- | Creates the @schema_migrations@ table if needed, then applies every
+-- not-yet-applied migration, in filename order (hence the numbered
+-- prefixes like @0001_initial.sql@). Each migration runs in its own
+-- transaction: all or nothing per file.
 --
--- Faalt met een 'Database.SQLite.Simple.SQLError' als een migratie kapot
--- is — bewust geen poging tot herstel; een stuk schema moet de app direct
--- laten stoppen, niet half opstarten.
+-- Fails with a 'Database.SQLite.Simple.SQLError' if a migration is
+-- broken — deliberately no attempt at recovery; a broken schema should
+-- make the app stop outright, not start up half-working.
 runMigrations :: Connection -> IO ()
 runMigrations conn = do
   ensureMigrationsTable conn
   applied <- appliedMigrations conn
-  -- 'data-files: migrations/*.sql' in package.yaml behoudt dat relatieve
-  -- pad onder de datadir: de .sql-bestanden zitten dus in
-  -- @<getDataDir>/migrations/@, niet in de datadir zelf.
+  -- 'data-files: migrations/*.sql' in package.yaml keeps that relative
+  -- path under the datadir: the .sql files live in
+  -- @<getDataDir>/migrations/@, not in the datadir itself.
   migrationsDir <- (</> "migrations") <$> getDataDir
   pendingFiles <-
     sort . filter (\f -> takeExtension f == ".sql") <$> listDirectory migrationsDir
@@ -64,10 +64,10 @@ appliedMigrations conn = do
   rows <- query_ conn "SELECT filename FROM schema_migrations" :: IO [Only Text.Text]
   pure (Set.fromList [Text.unpack fileName | Only fileName <- rows])
 
--- | Draait het hele bestand (kan meerdere @;@-gescheiden statements
--- bevatten) via direct-sqlite's 'Raw.exec' — sqlite-simple's eigen
--- 'execute_' bereidt maar één statement voor en zou de rest van het
--- bestand stilzwijgend negeren.
+-- | Runs the whole file (which can contain multiple @;@-separated
+-- statements) via direct-sqlite's 'Raw.exec' — sqlite-simple's own
+-- 'execute_' only prepares one statement and would silently ignore the
+-- rest of the file.
 applyMigration :: Connection -> FilePath -> FilePath -> IO ()
 applyMigration conn migrationsDir fileName = withTransaction conn $ do
   sql <- TextIO.readFile (migrationsDir </> fileName)

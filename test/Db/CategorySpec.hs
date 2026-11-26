@@ -22,18 +22,18 @@ import Test.Hspec
 spec :: Spec
 spec = around withTestDb $
   describe "Db.Category" $ do
-    it "wijst een lege groepsnaam af" $ \conn -> do
+    it "rejects an empty group name" $ \conn -> do
       result <- insertCategoryGroup conn ""
       result `shouldBe` Left (EmptyName "category group")
 
-    it "rondt een categoriegroep en de categorieën erin volledig" $ \conn -> do
-      group <- insertCategoryGroup conn "Vaste lasten" >>= expectRight
-      cgName group `shouldBe` "Vaste lasten"
+    it "round-trips a category group and the categories in it" $ \conn -> do
+      group <- insertCategoryGroup conn "Fixed Costs" >>= expectRight
+      cgName group `shouldBe` "Fixed Costs"
       isArchivedGroup group `shouldBe` False
 
-      cat1 <- insertCategory conn (cgId group) "Huur" >>= expectRight
-      cat2 <- insertCategory conn (cgId group) "Energie" >>= expectRight
-      catName cat1 `shouldBe` "Huur"
+      cat1 <- insertCategory conn (cgId group) "Rent" >>= expectRight
+      cat2 <- insertCategory conn (cgId group) "Utilities" >>= expectRight
+      catName cat1 `shouldBe` "Rent"
 
       inGroup <- listCategoriesInGroup conn (cgId group)
       inGroup `shouldBe` [cat1, cat2]
@@ -44,9 +44,9 @@ spec = around withTestDb $
       groups <- listCategoryGroups conn
       groups `shouldBe` [group]
 
-    it "archiveCategoryGroup/archiveCategory zetten archived_at" $ \conn -> do
-      group <- insertCategoryGroup conn "Oude groep" >>= expectRight
-      cat <- insertCategory conn (cgId group) "Oude categorie" >>= expectRight
+    it "archiveCategoryGroup/archiveCategory set archived_at" $ \conn -> do
+      group <- insertCategoryGroup conn "Old Group" >>= expectRight
+      cat <- insertCategory conn (cgId group) "Old Category" >>= expectRight
 
       archiveCategoryGroup conn (cgId group)
       archiveCategory conn (catId cat)

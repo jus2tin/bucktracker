@@ -25,7 +25,7 @@ import Database.SQLite.Simple
   )
 import Db.Account (getAccount)
 import Db.Field ()
-import Domain.Account (Account, sameBudgetStatus)
+import Domain.Account (Account, isOnBudget, sameBudgetStatus)
 import Domain.Error (DomainError (..))
 import Domain.Transaction
   ( Categorization (Categorized, Inflow, TransferLeg)
@@ -48,20 +48,20 @@ import Domain.Types
   , ymYear
   )
 
--- | Gooit alleen als een rij een vorm heeft die, gegeven de CHECK-
--- constraints in de migraties, onmogelijk zou moeten zijn (bv. kind =
--- 'inflow' maar amount is NULL). Geen stille foutieve default: dat zou
--- data corrumperen; een gewone 'error'/'fromJust' zou dan weer de
--- total-functions-regel breken. Dit is het IO-equivalent: een expliciete,
--- getypeerde, catchable exceptie.
+-- | Only thrown if a row has a shape that, given the CHECK constraints
+-- in the migrations, should be impossible (e.g. kind = 'inflow' but
+-- amount is NULL). Not a silent, wrong default: that would corrupt
+-- data; a plain 'error'/'fromJust' would in turn break the
+-- total-functions rule. This is the IO equivalent: an explicit, typed,
+-- catchable exception.
 newtype CorruptRow = CorruptRow Text deriving stock (Show)
 instance Exception CorruptRow
 
 requireField :: Text -> Maybe a -> IO a
 requireField label = maybe (throwIO (CorruptRow label)) pure
 
--- Platte rij-representatie van de transactions-tabel, vóór samenvoeging
--- met transaction_lines (voor 'Categorized') tot een echte 'Transaction'.
+-- Plain row representation of the transactions table, before merging
+-- with transaction_lines (for 'Categorized') into a real 'Transaction'.
 data TransactionRow = TransactionRow
   { trId          :: TransactionId
   , trAccount     :: AccountId
@@ -118,9 +118,9 @@ fetchLines conn txId' = do
       throwIO
         (CorruptRow ("transaction_lines has none for kind='categorized' transaction " <> Text.pack (show txId')))
 
--- | Bedrag en payee volgen uit 'Domain.Transaction.mkInflowTransaction' —
--- de insert bouwt alleen de rij, het domeinobject komt uit dezelfde smart
--- constructor als in Fase 1.
+-- | Amount and payee come from 'Domain.Transaction.mkInflowTransaction'
+-- — the insert only builds the row, the domain object comes from the
+-- same smart constructor as in Phase 1.
 insertInflow
   :: Connection
   -> AccountId
@@ -140,6 +140,14 @@ insertInflow conn accId day payee status amount importHash = do
   txId' <- TransactionId <$> lastInsertRowId conn
   pure (mkInflowTransaction txId' accId day payee status amount importHash)
 
+-- | Rejects a 'Categorized' transaction on a tracking account
+-- ('CategorizedTransactionRequiresOnBudgetAccount') before it's ever
+-- persisted — this is the enforcement point for invariant 1 that Phase
+-- 2 originally left out: a tracking account's balance is excluded from
+-- 'Domain.Budget.onBudgetBalanceTotal', so letting categorized spending
+-- land there would make money silently appear/disappear in the budget.
+-- (See 'Domain.Budget.categoryActivity' for the matching defense-in-depth
+-- check on the read side.)
 insertSpending
   :: Connection
   -> AccountId
@@ -148,33 +156,39 @@ insertSpending
   -> TransactionStatus
   -> NonEmpty TransactionLine
   -> Maybe ImportHash
-  -> IO Transaction
-insertSpending conn accId day payee status lines' importHash = withTransaction conn $ do
-  execute
-    conn
-    ( "INSERT INTO transactions (account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash) \
-      \VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?)"
-    )
-    (accId, day, payee, status, "categorized" :: Text, importHash)
-  txId' <- TransactionId <$> lastInsertRowId conn
-  forM_ (toList lines') $ \line ->
-    execute
-      conn
-      "INSERT INTO transaction_lines (transaction_id, category_id, amount) VALUES (?, ?, ?)"
-      (txId', tlCategory line, tlAmount line)
-  pure (mkSpendingTransaction txId' accId day payee status lines' importHash)
+  -> IO (Either DomainError Transaction)
+insertSpending conn accId day payee status lines' importHash = do
+  acc <- requireAccount conn accId
+  if not (isOnBudget acc)
+    then pure (Left CategorizedTransactionRequiresOnBudgetAccount)
+    else Right <$> withTransaction conn insertRows
+  where
+    insertRows = do
+      execute
+        conn
+        ( "INSERT INTO transactions (account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash) \
+          \VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?)"
+        )
+        (accId, day, payee, status, "categorized" :: Text, importHash)
+      txId' <- TransactionId <$> lastInsertRowId conn
+      forM_ (toList lines') $ \line ->
+        execute
+          conn
+          "INSERT INTO transaction_lines (transaction_id, category_id, amount) VALUES (?, ?, ?)"
+          (txId', tlCategory line, tlAmount line)
+      pure (mkSpendingTransaction txId' accId day payee status lines' importHash)
 
--- | De twee legs van een transfer. Valideert, in deze volgorde:
--- (1) de twee rekeningen moeten verschillen (zelfde check als Fase 1's
--- pure @mkTransferPair@); (2) ze moeten dezelfde budget-status hebben
--- ('sameBudgetStatus') — dit is de in Fase 2 nieuw afgedwongen regel uit
--- DECISIONS.md §3/§7. Beide legs worden in één transactie ingevoegd.
+-- | The two legs of a transfer. Validates, in this order: (1) the two
+-- accounts must differ (same check as Phase 1's pure
+-- @mkTransferPair@); (2) they must have the same budget status
+-- ('sameBudgetStatus') — the rule newly enforced in Phase 2 from
+-- DECISIONS.md §3/§7. Both legs are inserted in one transaction.
 insertTransfer
   :: Connection
-  -> (AccountId, AccountId) -- ^ (van, naar)
+  -> (AccountId, AccountId) -- ^ (from, to)
   -> Day
   -> TransactionStatus
-  -> Cents -- ^ het overgemaakte bedrag, als positief bedrag
+  -> Cents -- ^ the transferred amount, as a positive value
   -> IO (Either DomainError (Transaction, Transaction))
 insertTransfer conn (fromAccId, toAccId) day status amount
   | fromAccId == toAccId = pure (Left TransferRequiresDistinctAccounts)
@@ -221,11 +235,11 @@ insertTransferLeg conn transferId accId day status amount counterpartId = do
     (accId, day, "Transfer" :: Text, status, "transfer" :: Text, amount, transferId, counterpartId)
   TransactionId <$> lastInsertRowId conn
 
--- De kolomlijst wordt bewust drie keer letterlijk uitgeschreven in plaats
--- van via een gedeelde helper samengesteld: 'Query' heeft wel een
--- 'IsString'-instance voor losse literals, maar het samenvoegen van een
--- los opgebouwde 'Text'-waarde daarmee is onnodig risico voor drie simpele,
--- vaste SELECTs.
+-- The column list is deliberately spelled out literally three times
+-- instead of assembled via a shared helper: 'Query' does have an
+-- 'IsString' instance for plain literals, but concatenating a
+-- separately-built 'Text' value with that is needless risk for three
+-- simple, fixed SELECTs.
 getTransaction :: Connection -> TransactionId -> IO (Maybe Transaction)
 getTransaction conn txId' = do
   rows <-
@@ -248,10 +262,10 @@ listTransactionsForAccount conn accId = do
       (Only accId)
   traverse (rowToTransaction conn) rows
 
--- | Alle transacties met een datum binnen de gegeven kalendermaand. Nodig
--- om 'Domain.Budget.categoryActivity'/'accountInflows' te kunnen voeden
--- (de Db-laag levert rijen, de daadwerkelijke rollover-berekening blijft
--- in Domain.Budget — zie CLAUDE.md "Architectuur").
+-- | All transactions dated within the given calendar month. Needed to
+-- feed 'Domain.Budget.categoryActivity'/'accountInflows' (the Db layer
+-- delivers rows, the actual rollover calculation stays in Domain.Budget
+-- — see CLAUDE.md "Architecture").
 listTransactionsInMonth :: Connection -> YearMonth -> IO [Transaction]
 listTransactionsInMonth conn ym = do
   rows <-

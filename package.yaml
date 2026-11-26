@@ -10,13 +10,13 @@ extra-source-files:
 - README.md
 - CHANGELOG.md
 
-# Migraties zijn losse, reviewbare .sql-bestanden (geen TemplateHaskell/
-# file-embed): ze worden via data-files meegeïnstalleerd en op runtime
-# gevonden via het gegenereerde Paths_bucktracker-module. Zie DECISIONS.md §7.
+# Migrations are plain, reviewable .sql files (no TemplateHaskell/
+# file-embed): they get installed via data-files and found at runtime via
+# the generated Paths_bucktracker module. See DECISIONS.md §7.
 data-files:
 - migrations/*.sql
 
-synopsis:            Persoonlijke zero-based / envelope budget- en geldtracker
+synopsis:            Personal zero-based / envelope budget and money tracker
 category:            Finance
 
 description:         Please see the README on GitHub at <https://github.com/justintermaat/bucktracker#readme>
@@ -36,6 +36,7 @@ default-extensions:
 - TypeOperators
 - DerivingStrategies
 - DerivingVia
+- DeriveAnyClass
 
 ghc-options:
 - -Wall
@@ -51,26 +52,25 @@ ghc-options:
 
 library:
   source-dirs: src
-  # Fase 3 (Api/) dependencies staan hier al klaar (zie DECISIONS.md §1 en §6):
-  # servant/servant-server/warp/lucid/mtl/transformers/uuid/aeson worden pas
-  # echt gebruikt zodra Api/ geschreven is, tot die tijd geeft
-  # -Wunused-packages hier terecht een warning (geen -Werror lokaal).
   dependencies:
   - aeson
   - bytestring
   - containers
-  - direct-sqlite  # voor Db.Backup: de online backup API zit niet in sqlite-simple zelf
-  - directory       # XDG-datapad voor het standaard DB-bestand
+  - direct-sqlite    # for Db.Backup: the online backup API isn't in sqlite-simple itself
+  - directory        # XDG data path for the default DB file
   - envparse
   - filepath
+  - http-api-data     # Web.FormUrlEncoded (FromForm) for HTMX forms
   - lucid
   - mtl
   - resource-pool
   - servant
+  - servant-lucid     # MimeRender HTML (Html ()) for Servant handlers
   - servant-server
   - sqlite-simple
   - transformers
   - uuid
+  - wai
   - warp
 
 executables:
@@ -83,6 +83,7 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - bucktracker
+    - warp
 
 tests:
   bucktracker-test:
@@ -101,3 +102,8 @@ tests:
     - hspec-wai
     - sqlite-simple
     - directory
+    - wai
+    - wai-extra
+    - http-types
+    - bytestring
+    - filepath

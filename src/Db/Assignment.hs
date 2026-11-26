@@ -11,9 +11,9 @@ import Domain.Types (CategoryId, Cents, YearMonth, ymMonth, ymYear)
 instance FromRow Assignment where
   fromRow = Assignment <$> field <*> yearMonthField <*> field
 
--- | "Upsert": zet (of overschrijft) hoeveel er deze maand aan deze
--- categorie is toegewezen — één rij per (categorie, maand), zie de
--- UNIQUE-constraint in de migratie.
+-- | "Upsert": sets (or overwrites) how much has been assigned to this
+-- category this month — one row per (category, month), see the
+-- UNIQUE constraint in the migration.
 setAssignment :: Connection -> CategoryId -> YearMonth -> Cents -> IO ()
 setAssignment conn cid ym amount =
   execute
