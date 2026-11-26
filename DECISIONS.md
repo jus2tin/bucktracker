@@ -177,3 +177,160 @@ browser tabs/HTMX requests) without every request having to wait on a
 writing transaction — especially with WAL mode, which doesn't let readers
 be blocked by an active writer. `resource-pool` with a small maximum (e.g.
 4-8 connections) is the library used for this in Phase 2.
+
+## 8. External review backlog (Gemini review, 2026-11-26)
+
+An external review (`GEMINI_REVIEW.md`, written by Gemini, not by us) was
+read and independently checked against the actual code before acting on
+it — not taken at face value, since a review from one model is exactly as
+fallible as code from another. Checking involved reading the relevant
+source, and in a few cases compiling and running a small standalone
+repro rather than reasoning from memory. Full detail (locations, exact
+remediation code) lives in the conversation that did this triage, not
+repeated here — this section is the durable pointer back to it.
+
+**Fixed immediately** (both verified as real; see §3/§5 for why they
+matter):
+- Server bound to all network interfaces (`0.0.0.0`) instead of
+  loopback only, contradicting the no-auth/"localhost only" assumption
+  in §2 — confirmed by reading Warp's own source (`defaultSettings`'
+  host is `"*4"`). Fixed in `app/Main.hs` via `runSettings` +
+  `setHost "127.0.0.1"`.
+- `Db.Transaction.insertSpending` didn't check that the account is
+  on-budget, so a `Categorized` transaction on a `Tracking` account
+  would silently break invariant 1 (its activity would count toward
+  `categoryActivity`/`available`, but the account's balance is excluded
+  from `onBudgetBalanceTotal`). Fixed: `insertSpending` now rejects this
+  with `CategorizedTransactionRequiresOnBudgetAccount`, and
+  `Domain.Budget.categoryActivity` got the same on-budget filter
+  `accountInflows` already had, as defense-in-depth. Regression test
+  added in `Db.TransactionSpec`.
+
+**One claim checked and found wrong:** the review said an empty
+`BUCKTRACKER_DB_PATH` "crashes inside `createDirectoryIfMissing True
+(takeDirectory "")`" — compiled and ran exactly that: `takeDirectory ""`
+returns `"."`, no crash. (The underlying point — nothing rejects an
+empty path — still stands, see M-9 below.)
+
+**Deferred, not forgotten** — real or plausible, lower urgency than the
+two above (mostly because the HTTP surface they need doesn't exist yet,
+e.g. there's no Categories/Transactions UI to reach them through).
+Verification depth varies: items marked *(confirmed)* were checked
+against the code or reproduced; the rest are plausible on inspection but
+not individually re-derived.
+
+- **H-1.** No CSRF/`Host`/`Origin` protection on the mutating endpoints.
+  Matters more now that the server used to be LAN-reachable (fixed
+  above), but cross-origin requests to `127.0.0.1` from a malicious page
+  in the browser are still a real concern even loopback-only.
+- **H-2.** HTMX loads from a CDN with no SRI hash, and there are no
+  security headers (`CSP`, `X-Frame-Options`, etc.). The CDN dependency
+  itself is already a documented v0.1 tradeoff (`Api.Html`); the missing
+  SRI/headers are the new part.
+- **H-3.** *(confirmed)* `Db.Pool.openConfigured` sets `busy_timeout`
+  *after* `journal_mode=WAL`/`foreign_keys`; `withTransaction`'s
+  deferred `BEGIN` can hit `SQLITE_BUSY` immediately on a write-upgrade
+  without waiting for `busy_timeout`; and the `PRAGMA foreign_keys = ON`
+  inside `migrations/0001_initial.sql` is a documented SQLite no-op
+  because `applyMigration` runs it inside a transaction (harmless today
+  only because `openConfigured`/`Db.Setup` already set it per-connection
+  beforehand).
+- **H-4.** *(confirmed, reproduced)* `Db.Migrations.applyMigration`
+  reads `.sql` files with `Data.Text.IO.readFile`, which decodes using
+  the system locale encoding, not UTF-8. On this machine that's
+  `CP850`; reading the "§" in `migrations/0001_initial.sql`'s own header
+  comment silently produces two different, wrong characters instead.
+  Harmless today (it's inside a `--` comment) but will corrupt any
+  future migration with meaningful non-ASCII content. Same bug family
+  as the stdout encoding crash already fixed in `Main.hs` — that fix
+  didn't cover file reads.
+- **H-5.** `archiveAccount`/`archiveCategory` don't check for a zero
+  balance, don't block new transactions/assignments against an archived
+  entity, and `archiveCategoryGroup` doesn't cascade to its categories.
+  Also, there's no multi-month rollover orchestrator in `Domain.Budget`
+  yet (something that folds `nextCarriedIn`/`rolloverRtaAdjustment`
+  month-to-month) — `budgetBalancesAccounts` is only ever exercised
+  single-month, with `carriedIn = zeroCents`, in `BudgetSpec` today.
+- **H-6.** `Db.Backup.backupTo` copies in one `backupStep (-1)` call,
+  which (for a large db) holds the lock for the whole backup rather than
+  yielding between chunks — in tension with its own "doesn't lock out
+  writers" docstring. Also: no atomic temp-file-then-rename (a failed
+  backup can leave a half-written file and destroys any previous backup
+  at that path), and no guard against `destPath == sourcePath`.
+- **M-1.** `negate (minBound :: Int64) == minBound` (two's-complement
+  wraparound) — `negateCents`/`scaleCents` have no bounds checking.
+  `splitEvenly` also has no bound on `n` (memory use is `O(n)`).
+- **M-2.** `mkTransferPair`/`insertTransfer` don't reject `amount <= 0`.
+- **M-3.** `insertTransfer`'s account lookups run outside the write
+  transaction (TOCTOU window), and `CorruptRow`/`UnknownAccount` are
+  thrown as unexported `IO` exceptions rather than surfaced as
+  `DomainError` — a caller can't catch `UnknownAccount` to return a 404.
+- **M-4.** N+1 queries in `listTransactionsForAccount`/
+  `listTransactionsInMonth` (one `fetchLines` call per categorized
+  transaction); no shared read-transaction across that initial query and
+  the follow-ups; `rowToTransaction`'s wildcard branch treats any
+  unrecognized `kind` as `"categorized"` instead of matching the literal
+  — currently inert because the DB `CHECK` constraint already limits
+  `kind` to the three known values, but worth tightening for clarity.
+- **M-5.** `mkYearMonth` doesn't bound the year, and
+  `listTransactionsInMonth`'s `date >= ? AND date < ?` text comparison
+  only sorts correctly for 4-digit years (a 5-digit year would compare
+  as "less than" a 4-digit one as plain text).
+- **M-6.** `nonEmptyName` validates against the *stripped* name but
+  stores the *unstripped* one (so `"  Checking  "` is stored verbatim);
+  no max length anywhere.
+- **M-7.** Several `Api.Accounts` HTTP-semantics nitpicks: the form has
+  no `method_ "post"`/`action_` fallback for when HTMX fails to load;
+  validation errors return `200 OK` instead of a 4xx; archiving an
+  unknown or already-archived ID is a silent no-op; no `hx-confirm` on
+  archiving; `createAccountHandler`/`archiveAccountHandler` each check
+  out a pool connection twice (once for the write, once inside
+  `renderFragment`'s re-read) instead of once.
+- **M-8.** No graceful shutdown (`Main` never calls `closePool`); if
+  `runMigrations` throws inside `Db.Pool.createPool`, the pool it just
+  made is never destroyed; `openConfigured` doesn't close the connection
+  if a `PRAGMA` call fails after `open`.
+- **M-9.** `BUCKTRACKER_PORT` has no `1..65535` range check;
+  `BUCKTRACKER_DB_PATH` uses `str` instead of `nonempty`, so an
+  explicitly-empty value passes config parsing. (The specific crash
+  claimed for the empty-path case was checked and is wrong — see above —
+  but the missing validation itself is real.)
+- **M-10.** `Account`/`CategoryGroup`/`Category` export their raw data
+  constructors, so code outside `Domain` can build one bypassing
+  `mkAccount`/`mkCategory` (unlike `YearMonth`, which hides its
+  constructor on purpose). Also, `DECISIONS.md` §3 names reconciliation
+  as in-scope for v0.1, but `Domain.Budget` only has `accountBalance`
+  (all statuses combined) — no `clearedBalance`/reconciliation function
+  exists yet.
+- **L-2.** The "Categories" nav link in `Api.Html` points at `/categories`,
+  which isn't mounted yet — a dead link until that page exists (next on
+  the roadmap anyway).
+- **L-3.** The schema could use a few more defense-in-depth `CHECK`
+  constraints (same-account transfer legs, non-zero transfer amount,
+  non-blank names, a sane year range on `assignments`, a partial unique
+  index on `import_hash`).
+- **L-6.** `README.md` is still just a title (no setup instructions/env
+  vars documented); `stack.yaml`'s snapshot is a raw GitHub URL rather
+  than the equivalent `snapshot: lts-24.68` shorthand (mitigated today
+  by `stack.yaml.lock`).
+- **Test suite gaps**, mostly a consequence of the above not being fixed
+  yet rather than independent bugs: invariant 1 is never tested across
+  multiple months; `Domain.Gen`'s `genCents`/`genDayIn` are bounded in
+  ways that hide the `Int64`/calendar edge cases above by construction;
+  `genWorld` never generates a `Tracking -> Tracking` transfer and gives
+  every transfer `TransferId 0` before renumbering (only `txId` gets
+  renumbered); `Api.AccountsSpec` checks status codes/error text more
+  often than actual persisted state (e.g. the "without adding a row"
+  tests don't re-query to confirm); `bodyContains` in that spec decodes
+  the response body as Latin-1 (`BSL8.unpack`), which would mismatch a
+  genuine multi-byte UTF-8 comparison (harmless today since all current
+  fixture strings are ASCII); `Api.Setup`/`Db.PoolSpec`'s temp
+  files/pools are never cleaned up after a test run.
+
+**Discarded** (checked and found to not apply, so deliberately left out
+above): the English-only violation finding — true when the review was
+written, resolved by the translation pass earlier in this project's
+history; the unused-dependency/orphan-instance warnings — not a finding,
+an already-documented deliberate Phase 3 tradeoff (§1, §6, and the
+comments in `package.yaml`); the missing WAL-sidecar `.gitignore`
+patterns — fixed directly instead of deferred.
