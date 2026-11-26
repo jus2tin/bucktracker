@@ -1,0 +1,121 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
+
+name:           bucktracker
+version:        0.1.0.0
+synopsis:       Persoonlijke zero-based / envelope budget- en geldtracker
+description:    Please see the README on GitHub at <https://github.com/justintermaat/bucktracker#readme>
+category:       Finance
+homepage:       https://github.com/justintermaat/bucktracker#readme
+bug-reports:    https://github.com/justintermaat/bucktracker/issues
+author:         Justin Termaat
+maintainer:     justintermaat@gmail.com
+copyright:      2026 Justin Termaat
+license:        MIT
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+    CHANGELOG.md
+
+source-repository head
+  type: git
+  location: https://github.com/justintermaat/bucktracker
+
+library
+  exposed-modules:
+      Domain
+      Domain.Account
+      Domain.Budget
+      Domain.Category
+      Domain.Error
+      Domain.Transaction
+      Domain.Types
+  other-modules:
+      Paths_bucktracker
+  hs-source-dirs:
+      src
+  default-extensions:
+      OverloadedStrings
+      StrictData
+      DeriveGeneric
+      DataKinds
+      TypeOperators
+      DerivingStrategies
+      DerivingVia
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wunused-packages
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , lucid
+    , mtl
+    , servant
+    , servant-server
+    , sqlite-simple
+    , text
+    , time
+    , transformers
+    , uuid
+    , warp
+  default-language: GHC2021
+
+executable bucktracker-exe
+  main-is: Main.hs
+  other-modules:
+      Paths_bucktracker
+  hs-source-dirs:
+      app
+  default-extensions:
+      OverloadedStrings
+      StrictData
+      DeriveGeneric
+      DataKinds
+      TypeOperators
+      DerivingStrategies
+      DerivingVia
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wunused-packages -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , bucktracker
+    , text
+    , time
+  default-language: GHC2021
+
+test-suite bucktracker-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Domain.AccountSpec
+      Domain.BudgetSpec
+      Domain.CategorySpec
+      Domain.Gen
+      Domain.TransactionSpec
+      Domain.TypesSpec
+      Paths_bucktracker
+  hs-source-dirs:
+      test
+  default-extensions:
+      OverloadedStrings
+      StrictData
+      DeriveGeneric
+      DataKinds
+      TypeOperators
+      DerivingStrategies
+      DerivingVia
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wunused-packages -threaded -rtsopts -with-rtsopts=-N
+  build-tool-depends:
+      hspec-discover:hspec-discover
+  build-depends:
+      QuickCheck
+    , base >=4.7 && <5
+    , bucktracker
+    , hspec
+    , hspec-wai
+    , text
+    , time
+  default-language: GHC2021
