@@ -9,15 +9,15 @@ import System.IO (hSetEncoding, stderr, stdout, utf8)
 
 main :: IO ()
 main = do
-  -- Zonder dit crasht de app op Windows zodra er een niet-ASCII teken
-  -- (em-dash, "é" in een categorienaam, ...) naar de console gaat: de
-  -- actieve codepage daar is zelden UTF-8, en de standaard-encoding van
-  -- stdout/stderr volgt die codepage.
+  -- Without this, the app crashes on Windows as soon as a non-ASCII
+  -- character (em-dash, "é" in a category name, ...) goes to the
+  -- console: the active codepage there is rarely UTF-8, and the default
+  -- encoding of stdout/stderr follows that codepage.
   hSetEncoding stdout utf8
   hSetEncoding stderr utf8
   config <- loadConfig
   pool <- createPool (configDbPath config)
   let env = AppEnv pool
-  putStrLn ("bucktracker: database gereed op " <> configDbPath config <> " (migraties toegepast).")
-  putStrLn ("bucktracker: luistert op http://localhost:" <> show (configPort config))
+  putStrLn ("bucktracker: database ready at " <> configDbPath config <> " (migrations applied).")
+  putStrLn ("bucktracker: listening on http://localhost:" <> show (configPort config))
   run (configPort config) (application env)

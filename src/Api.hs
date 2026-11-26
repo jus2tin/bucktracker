@@ -1,4 +1,4 @@
--- | De samengestelde Servant-API en de WAI-'Application' die Warp draait.
+-- | The combined Servant API and the WAI 'Application' that Warp runs.
 module Api
   ( application
   ) where
@@ -22,8 +22,8 @@ rootApi = Proxy
 server :: ServerT RootApi AppM
 server = rootHandler :<|> accountsServer
 
--- | "/" stuurt door naar "/accounts" — er is nog geen echt dashboard
--- (volgt met de budgetpagina, zie DECISIONS.md §4).
+-- | "/" redirects to "/accounts" — there's no real dashboard yet (will
+-- come with the budget page, see DECISIONS.md §4).
 rootHandler :: AppM (Html ())
 rootHandler = throwError err303 {errHeaders = [("Location", "/accounts")]}
 

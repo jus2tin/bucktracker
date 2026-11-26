@@ -1,7 +1,7 @@
--- | De handler-monad: 'ReaderT' 'AppEnv' over Servant's 'Handler' (zie
--- CLAUDE.md "Error handling" en DECISIONS.md §2) — handlers kunnen zo
--- zonder een draaiende server getest worden door zelf een 'AppEnv' te
--- geven en 'runAppM' aan te roepen.
+-- | The handler monad: 'ReaderT' 'AppEnv' over Servant's 'Handler' (see
+-- CLAUDE.md "Error handling" and DECISIONS.md §2) — handlers can be
+-- tested this way without a running server, by supplying your own
+-- 'AppEnv' and calling 'runAppM'.
 module Api.Monad
   ( AppEnv (..)
   , AppM
@@ -27,9 +27,9 @@ newtype AppM a = AppM (ReaderT AppEnv Handler a)
 runAppM :: AppEnv -> AppM a -> Handler a
 runAppM env (AppM action) = runReaderT action env
 
--- | Leen een connectie uit de pool voor de duur van @action@ (zie
--- Db.Pool: repository-functies werken altijd met een losse 'Connection',
--- nooit met de 'Pool' zelf).
+-- | Borrow a connection from the pool for the duration of @action@ (see
+-- Db.Pool: repository functions always work with a plain 'Connection',
+-- never with the 'Pool' itself).
 withConn :: (Connection -> IO a) -> AppM a
 withConn action = do
   pool <- asks appPool

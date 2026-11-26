@@ -1,10 +1,10 @@
--- | Gedeelde paginalayout en kleine HTMX-helpers.
+-- | Shared page layout and small HTMX helpers.
 --
--- Server-rendered HTML, geen npm/JS-buildstap (DECISIONS.md §2): HTMX komt
--- als los @\<script\>@-tag van een CDN. Dat vereist internet in de browser
--- om de pagina te laden — een bekende, bewuste v0.1-beperking; vendoren
--- als lokaal bestand (via @data-files@, net als de migraties) kan later
--- als volledig-offline-gebruik nodig blijkt.
+-- Server-rendered HTML, no npm/JS build step (DECISIONS.md §2): HTMX
+-- comes from a plain CDN @\<script\>@ tag. That requires internet access
+-- in the browser to load the page — a known, deliberate v0.1 limitation;
+-- vendoring it as a local file (via @data-files@, like the migrations)
+-- can happen later if fully-offline use turns out to be needed.
 module Api.Html
   ( page
   , errorBanner
@@ -27,9 +27,9 @@ page title content = doctypehtml_ $ do
     style_ pageStyle
   body_ $ do
     nav_ $ do
-      a_ [href_ "/accounts"] "Rekeningen"
+      a_ [href_ "/accounts"] "Accounts"
       " · "
-      a_ [href_ "/categories"] "Categorieën"
+      a_ [href_ "/categories"] "Categories"
     content
 
 errorBanner :: Maybe Text -> Html ()

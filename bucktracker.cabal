@@ -6,7 +6,7 @@ cabal-version: 1.12
 
 name:           bucktracker
 version:        0.1.0.0
-synopsis:       Persoonlijke zero-based / envelope budget- en geldtracker
+synopsis:       Personal zero-based / envelope budget and money tracker
 description:    Please see the README on GitHub at <https://github.com/justintermaat/bucktracker#readme>
 category:       Finance
 homepage:       https://github.com/justintermaat/bucktracker#readme
