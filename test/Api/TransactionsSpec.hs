@@ -1,0 +1,134 @@
+module Api.TransactionsSpec (spec) where
+
+import Api.Setup (withTestApp)
+import qualified Data.ByteString.Lazy.Char8 as BSL8
+import Data.List (isInfixOf)
+import Data.Time (getCurrentTime, showGregorian, utctDay)
+import Network.Wai.Test (SResponse (simpleBody))
+import Test.Hspec
+import Test.Hspec.Wai
+
+-- | The register only ever shows the current calendar month (no month
+-- picker yet, see Api.Transactions) — tests therefore post transactions
+-- dated today rather than a fixed date, so they keep passing regardless
+-- of when they're run.
+today :: IO String
+today = showGregorian . utctDay <$> getCurrentTime
+
+spec :: Spec
+spec = with withTestApp $ do
+  describe "GET /transactions" $
+    it "shows an empty register as long as there are no transactions" $
+      get "/transactions" `shouldRespondWith` 200
+
+  describe "POST /transactions/inflow" $ do
+    it "creates an inflow transaction and shows it in the register" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "123.45")]
+      liftIO (bodyContains "Salary" response `shouldBe` True)
+      liftIO (bodyContains "123.45" response `shouldBe` True)
+      liftIO (bodyContains "Ready to Assign" response `shouldBe` True)
+
+    it "rejects an unknown account with an error message, without adding a row" $ do
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "999"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "1")]
+      liftIO (bodyContains "Unknown account" response `shouldBe` True)
+
+    it "rejects an invalid amount with an error message, without adding a row" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "not a number")]
+      liftIO (bodyContains "Invalid amount" response `shouldBe` True)
+
+  describe "POST /transactions/spending" $ do
+    it "creates a categorized expense and shows it in the register, stored as negative" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingCategoryId", "1")
+          , ("spendingDate", day)
+          , ("spendingPayee", "Supermarket")
+          , ("spendingAmount", "12.34")
+          ]
+      liftIO (bodyContains "Supermarket" response `shouldBe` True)
+      liftIO (bodyContains "Groceries" response `shouldBe` True)
+      liftIO (bodyContains "-12.34" response `shouldBe` True)
+
+    it "rejects a categorized expense on a tracking account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Investments"), ("accountType", "tracking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingCategoryId", "1")
+          , ("spendingDate", day)
+          , ("spendingPayee", "Supermarket")
+          , ("spendingAmount", "12.34")
+          ]
+      liftIO (bodyContains "not allowed on tracking accounts" response `shouldBe` True)
+
+    it "rejects an unknown category with an error message, without adding a row" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingCategoryId", "999")
+          , ("spendingDate", day)
+          , ("spendingPayee", "Supermarket")
+          , ("spendingAmount", "12.34")
+          ]
+      liftIO (bodyContains "Unknown category" response `shouldBe` True)
+
+  describe "POST /transactions/transfer" $ do
+    it "creates both legs of a transfer and shows them in the register" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Savings"), ("accountType", "savings")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
+      liftIO (bodyContains "Transfer: Savings" response `shouldBe` True)
+      liftIO (bodyContains "Transfer: Checking" response `shouldBe` True)
+
+    it "rejects a transfer to the same account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "1"), ("transferDate", day), ("transferAmount", "50.00")]
+      liftIO (bodyContains "two different accounts" response `shouldBe` True)
+
+    it "rejects a transfer between an on-budget and a tracking account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Investments"), ("accountType", "tracking")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
+      liftIO (bodyContains "tracking account" response `shouldBe` True)
+
+bodyContains :: String -> SResponse -> Bool
+bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody

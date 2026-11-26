@@ -30,6 +30,8 @@ page title content = doctypehtml_ $ do
       a_ [href_ "/accounts"] "Accounts"
       " · "
       a_ [href_ "/categories"] "Categories"
+      " · "
+      a_ [href_ "/transactions"] "Transactions"
     content
 
 errorBanner :: Maybe Text -> Html ()

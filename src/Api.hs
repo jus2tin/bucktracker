@@ -12,17 +12,19 @@ import Servant.HTML.Lucid (HTML)
 import Api.Accounts (AccountsApi, accountsServer)
 import Api.Categories (CategoriesApi, categoriesServer)
 import Api.Monad (AppEnv, AppM, runAppM)
+import Api.Transactions (TransactionsApi, transactionsServer)
 
 type RootApi =
   Get '[HTML] (Html ())
     :<|> AccountsApi
     :<|> CategoriesApi
+    :<|> TransactionsApi
 
 rootApi :: Proxy RootApi
 rootApi = Proxy
 
 server :: ServerT RootApi AppM
-server = rootHandler :<|> accountsServer :<|> categoriesServer
+server = rootHandler :<|> accountsServer :<|> categoriesServer :<|> transactionsServer
 
 -- | "/" redirects to "/accounts" — there's no real dashboard yet (will
 -- come with the budget page, see DECISIONS.md §4).
