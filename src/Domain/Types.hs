@@ -1,10 +1,10 @@
--- | Fundamentele domeintypes: geld, maanden, ID's en simpele enums.
+-- | Fundamental domain types: money, months, IDs and simple enums.
 --
--- Alles hier is total: er wordt nergens @error@, @head@ of @fromJust@
--- gebruikt. Waar een waarde ongeldig kan zijn, geeft de smart constructor
--- een 'Either' 'Domain.Error.DomainError' terug in plaats van te crashen.
+-- Everything here is total: @error@, @head@ and @fromJust@ are never
+-- used. Where a value could be invalid, the smart constructor returns an
+-- 'Either' 'Domain.Error.DomainError' instead of crashing.
 module Domain.Types
-  ( -- * Geld
+  ( -- * Money
     Cents
   , zeroCents
   , cents
@@ -13,7 +13,7 @@ module Domain.Types
   , scaleCents
   , splitEvenly
 
-    -- * Maanden
+    -- * Months
   , YearMonth
   , ymYear
   , ymMonth
@@ -22,7 +22,7 @@ module Domain.Types
   , nextYearMonth
   , prevYearMonth
 
-    -- * ID's
+    -- * IDs
   , AccountId (..)
   , CategoryGroupId (..)
   , CategoryId (..)
@@ -48,10 +48,10 @@ import Data.Text (Text)
 import Data.Time (Day, toGregorian)
 import Domain.Error (DomainError (..))
 
--- | Een geldbedrag in gehele centen. Nooit 'Double'/'Float'. Bewust geen
--- 'Num'-instance (zodat "centen keer centen" niet per ongeluk compileert);
--- optellen gaat via het 'Monoid' (som), en 'scaleCents' voor een geheel
--- veelvoud.
+-- | A money amount in whole cents. Never 'Double'/'Float'. Deliberately
+-- no 'Num' instance (so "cents times cents" doesn't accidentally
+-- compile); addition goes through the 'Monoid' (sum), and 'scaleCents'
+-- for multiplying by a whole number.
 newtype Cents = Cents Int64
   deriving stock (Eq, Ord, Show)
 
@@ -73,15 +73,15 @@ centsValue (Cents c) = c
 negateCents :: Cents -> Cents
 negateCents (Cents c) = Cents (negate c)
 
--- | Vermenigvuldig met een geheel getal (bv. "x maanden vooruit sparen").
+-- | Multiply by a whole number (e.g. "save x months ahead").
 scaleCents :: Int64 -> Cents -> Cents
 scaleCents factor (Cents c) = Cents (factor * c)
 
--- | Verdeel een bedrag zo gelijk mogelijk over @n@ regels (bv. een split-
--- transactie). De som van het resultaat is altijd *exact* gelijk aan het
--- origineel; eventuele afrondingscenten gaan naar de eerste regels. Voor
--- @n <= 0@ komt het hele bedrag in één regel terecht — "splitsen in niets"
--- bestaat niet, dus dit is de enige zinnige, total betekenis.
+-- | Split an amount as evenly as possible across @n@ lines (e.g. a split
+-- transaction). The sum of the result is always *exactly* equal to the
+-- original; any rounding cents go to the first lines. For @n <= 0@ the
+-- whole amount ends up in a single line — "splitting into nothing"
+-- doesn't exist, so this is the only sensible, total meaning.
 splitEvenly :: Cents -> Int -> NonEmpty Cents
 splitEvenly total n = fromMaybe (total :| []) (NE.nonEmpty parts)
   where
@@ -91,16 +91,16 @@ splitEvenly total n = fromMaybe (total :| []) (NE.nonEmpty parts)
     bumps = replicate (fromIntegral (abs remainder)) (signum remainder) ++ repeat 0
     parts = [ Cents (base + b) | b <- take count bumps ]
 
--- | Een kalendermaand (budgetperiode). De constructor wordt niet
--- geëxporteerd: een 'YearMonth' is alleen te maken via 'mkYearMonth' of
--- 'dayToYearMonth', dus @ymMonth@ ligt altijd in @[1,12]@.
+-- | A calendar month (budget period). The constructor isn't exported: a
+-- 'YearMonth' can only be made via 'mkYearMonth' or 'dayToYearMonth', so
+-- @ymMonth@ always lies in @[1,12]@.
 data YearMonth = YearMonth
   { ymYear  :: Int
   , ymMonth :: Int
   } deriving stock (Eq, Ord, Show)
 
--- | Smart constructor: 'Left' ('InvalidMonth' m) als de maand buiten
--- @[1,12]@ valt.
+-- | Smart constructor: 'Left' ('InvalidMonth' m) if the month is outside
+-- @[1,12]@.
 mkYearMonth :: Int -> Int -> Either DomainError YearMonth
 mkYearMonth y m
   | m >= 1 && m <= 12 = Right (YearMonth y m)
@@ -111,8 +111,9 @@ dayToYearMonth day =
   let (y, m, _) = toGregorian day
   in YearMonth (fromIntegral y) m
 
--- | Totaal over @Int@: ook op een (via de verborgen constructor
--- onmogelijke) ongeldige maand loopt dit niet vast, het telt gewoon door.
+-- | Total over @Int@: even on an (impossible, given the hidden
+-- constructor) invalid month this doesn't get stuck, it just keeps
+-- counting.
 nextYearMonth :: YearMonth -> YearMonth
 nextYearMonth (YearMonth y 12) = YearMonth (y + 1) 1
 nextYearMonth (YearMonth y m)  = YearMonth y (m + 1)
@@ -136,13 +137,13 @@ newtype TransactionId = TransactionId Int64
 newtype TransferId = TransferId Int64
   deriving stock (Eq, Ord, Show)
 
--- | Hash van een geïmporteerde brontransactie (CSV/CAMT.053, fase later),
--- gebruikt om herimport te dedupliceren. Nog ongebruikt in v0.1.
+-- | Hash of an imported source transaction (CSV/CAMT.053, a later
+-- phase), used to deduplicate re-imports. Still unused in v0.1.
 newtype ImportHash = ImportHash Text
   deriving stock (Eq, Ord, Show)
 
--- | Checking/Savings/Cash zijn "on-budget"; Tracking telt niet mee voor
--- Ready to Assign (bv. beleggingen).
+-- | Checking/Savings/Cash are "on-budget"; Tracking doesn't count toward
+-- Ready to Assign (e.g. investments).
 data AccountType = Checking | Savings | Cash | Tracking
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
@@ -150,9 +151,9 @@ isOnBudgetType :: AccountType -> Bool
 isOnBudgetType Tracking = False
 isOnBudgetType _        = True
 
--- | Canonieke tekstrepresentatie, gebruikt zowel als SQLite TEXT-waarde
--- (Db.Field) als HTML-formulierwaarde (Api) — één bron van waarheid in
--- plaats van de mapping op twee plekken te dupliceren.
+-- | Canonical text representation, used both as the SQLite TEXT value
+-- (Db.Field) and as the HTML form value (Api) — a single source of
+-- truth instead of duplicating the mapping in two places.
 accountTypeToText :: AccountType -> Text
 accountTypeToText Checking = "checking"
 accountTypeToText Savings  = "savings"

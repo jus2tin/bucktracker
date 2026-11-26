@@ -1,6 +1,7 @@
--- | Verzamelmodule: importeer @Domain@ in plaats van elke submodule apart.
--- Bedoeld voor consumenten buiten @Domain/@ (straks @Api/@ en @Db/@); binnen
--- @Domain/@ zelf wordt per submodule geïmporteerd om cirkels te vermijden.
+-- | Aggregate module: import @Domain@ instead of each submodule
+-- separately. Meant for consumers outside @Domain/@ (@Api/@ and @Db/@);
+-- within @Domain/@ itself, submodules are imported individually to
+-- avoid cycles.
 module Domain
   ( module Domain.Types
   , module Domain.Error

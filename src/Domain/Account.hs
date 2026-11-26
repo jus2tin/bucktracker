@@ -12,13 +12,13 @@ import Domain.Error (DomainError)
 import Domain.Types (AccountId, AccountType (..), isOnBudgetType)
 import Domain.Validation (nonEmptyName)
 
--- | Een rekening. De beginstand wordt bewust niet als veld opgeslagen, maar
--- als een gewone 'Domain.Transaction.Inflow'-transactie op deze rekening
--- (zie DECISIONS.md §3, "Rekeningen").
+-- | An account. The opening balance is deliberately not stored as a
+-- field, but as a plain 'Domain.Transaction.Inflow' transaction on this
+-- account (see DECISIONS.md §3, "Accounts").
 --
--- 'accArchivedAt': soft-delete (DECISIONS.md §7) — 'Nothing' betekent
--- actief; een gearchiveerde rekening blijft bestaan voor historische
--- transacties, maar hoort niet meer in nieuwe keuzelijsten.
+-- 'accArchivedAt': soft delete (DECISIONS.md §7) — 'Nothing' means
+-- active; an archived account keeps existing for historical
+-- transactions, but no longer belongs in new pickers.
 data Account = Account
   { accId         :: AccountId
   , accName       :: Text
@@ -26,7 +26,7 @@ data Account = Account
   , accArchivedAt :: Maybe UTCTime
   } deriving stock (Eq, Show)
 
--- | Een nieuw aangemaakte rekening is per definitie nog niet gearchiveerd.
+-- | A newly created account is, by definition, not archived yet.
 mkAccount :: AccountId -> Text -> AccountType -> Either DomainError Account
 mkAccount aid name ty =
   (\n -> Account aid n ty Nothing) <$> nonEmptyName "account" name
@@ -39,12 +39,12 @@ isArchived acc = case accArchivedAt acc of
   Just _  -> True
   Nothing -> False
 
--- | Of twee rekeningen dezelfde "budget-status" hebben (beide on-budget, of
--- beide tracking). Een transfer tussen een on-budget en een
--- tracking-rekening wordt in v0.1 niet ondersteund — zie DECISIONS.md §3
--- voor waarom dat de kerninvariant zou breken. Vanaf Fase 2 wordt dit ook
--- echt afgedwongen: 'Db.Transaction.insertTransfer' gebruikt deze functie
--- om de twee opgezochte rekeningen te controleren en geeft anders
--- 'Domain.Error.TransferRequiresMatchingBudgetStatus' terug.
+-- | Whether two accounts have the same "budget status" (both on-budget,
+-- or both tracking). A transfer between an on-budget and a tracking
+-- account isn't supported in v0.1 — see DECISIONS.md §3 for why that
+-- would break the core invariant. From Phase 2 onward this is also
+-- actually enforced: 'Db.Transaction.insertTransfer' uses this function
+-- to check the two accounts it looked up, and otherwise returns
+-- 'Domain.Error.TransferRequiresMatchingBudgetStatus'.
 sameBudgetStatus :: Account -> Account -> Bool
 sameBudgetStatus a b = isOnBudget a == isOnBudget b

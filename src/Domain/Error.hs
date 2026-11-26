@@ -1,8 +1,8 @@
--- | Alle manieren waarop een pure domeinbewerking kan mislukken.
+-- | Every way a pure domain operation can fail.
 --
--- Platte, structurele constructoren (geen vrije foutteksten): de Api-laag
--- vertaalt dit zelf naar een HTTP-status en een boodschap in de taal van de
--- gebruiker. Zie DECISIONS.md §3 voor de redenering achter elke regel.
+-- Plain, structural constructors (no free-form error text): the Api layer
+-- translates this itself into an HTTP status and a message in the user's
+-- language. See DECISIONS.md §3 for the reasoning behind each case.
 module Domain.Error
   ( DomainError (..)
   ) where
@@ -10,16 +10,17 @@ module Domain.Error
 import Data.Text (Text)
 
 data DomainError
-  = -- | Naam van een rekening/categorie(groep) was leeg of enkel whitespace.
-    -- Het veld zegt om welk soort entiteit het ging, voor een nette melding.
+  = -- | An account/category(group) name was empty or whitespace-only.
+    -- The field names the kind of entity, for a decent error message.
     EmptyName Text
-  | -- | 'Domain.Types.mkYearMonth' kreeg een maandnummer buiten [1,12].
+  | -- | 'Domain.Types.mkYearMonth' got a month number outside [1,12].
     InvalidMonth Int
-  | -- | Een transfer kreeg dezelfde rekening als beide kanten.
+  | -- | A transfer got the same account on both sides.
     TransferRequiresDistinctAccounts
-  | -- | Een transfer verbond een on-budget met een tracking-rekening. Dat
-    -- zou invariant 1 breken (zie DECISIONS.md §3/§7): vanaf Fase 2 wordt
-    -- dit afgedwongen door 'Db.Transaction.insertTransfer', die de twee
-    -- rekeningen opzoekt en 'Domain.Account.sameBudgetStatus' controleert.
+  | -- | A transfer connected an on-budget account with a tracking
+    -- account. That would break invariant 1 (see DECISIONS.md §3/§7):
+    -- from Phase 2 onward this is enforced by
+    -- 'Db.Transaction.insertTransfer', which looks up the two accounts
+    -- and checks 'Domain.Account.sameBudgetStatus'.
     TransferRequiresMatchingBudgetStatus
   deriving stock (Eq, Show)
