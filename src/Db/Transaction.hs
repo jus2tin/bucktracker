@@ -25,7 +25,7 @@ import Database.SQLite.Simple
   )
 import Db.Account (getAccount)
 import Db.Field ()
-import Domain.Account (Account, sameBudgetStatus)
+import Domain.Account (Account, isOnBudget, sameBudgetStatus)
 import Domain.Error (DomainError (..))
 import Domain.Transaction
   ( Categorization (Categorized, Inflow, TransferLeg)
@@ -140,6 +140,14 @@ insertInflow conn accId day payee status amount importHash = do
   txId' <- TransactionId <$> lastInsertRowId conn
   pure (mkInflowTransaction txId' accId day payee status amount importHash)
 
+-- | Rejects a 'Categorized' transaction on a tracking account
+-- ('CategorizedTransactionRequiresOnBudgetAccount') before it's ever
+-- persisted — this is the enforcement point for invariant 1 that Phase
+-- 2 originally left out: a tracking account's balance is excluded from
+-- 'Domain.Budget.onBudgetBalanceTotal', so letting categorized spending
+-- land there would make money silently appear/disappear in the budget.
+-- (See 'Domain.Budget.categoryActivity' for the matching defense-in-depth
+-- check on the read side.)
 insertSpending
   :: Connection
   -> AccountId
@@ -148,21 +156,27 @@ insertSpending
   -> TransactionStatus
   -> NonEmpty TransactionLine
   -> Maybe ImportHash
-  -> IO Transaction
-insertSpending conn accId day payee status lines' importHash = withTransaction conn $ do
-  execute
-    conn
-    ( "INSERT INTO transactions (account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash) \
-      \VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?)"
-    )
-    (accId, day, payee, status, "categorized" :: Text, importHash)
-  txId' <- TransactionId <$> lastInsertRowId conn
-  forM_ (toList lines') $ \line ->
-    execute
-      conn
-      "INSERT INTO transaction_lines (transaction_id, category_id, amount) VALUES (?, ?, ?)"
-      (txId', tlCategory line, tlAmount line)
-  pure (mkSpendingTransaction txId' accId day payee status lines' importHash)
+  -> IO (Either DomainError Transaction)
+insertSpending conn accId day payee status lines' importHash = do
+  acc <- requireAccount conn accId
+  if not (isOnBudget acc)
+    then pure (Left CategorizedTransactionRequiresOnBudgetAccount)
+    else Right <$> withTransaction conn insertRows
+  where
+    insertRows = do
+      execute
+        conn
+        ( "INSERT INTO transactions (account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash) \
+          \VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?)"
+        )
+        (accId, day, payee, status, "categorized" :: Text, importHash)
+      txId' <- TransactionId <$> lastInsertRowId conn
+      forM_ (toList lines') $ \line ->
+        execute
+          conn
+          "INSERT INTO transaction_lines (transaction_id, category_id, amount) VALUES (?, ?, ?)"
+          (txId', tlCategory line, tlAmount line)
+      pure (mkSpendingTransaction txId' accId day payee status lines' importHash)
 
 -- | The two legs of a transfer. Validates, in this order: (1) the two
 -- accounts must differ (same check as Phase 1's pure

@@ -43,7 +43,7 @@ spec = do
     it "on-budget account balances == category balances + Ready to Assign" $
       forAll genWorld $ \w ->
         let categoryMonths =
-              [ buildCategoryMonth (catId c) (wMonth w) zeroCents (wAssignments w) (wTransactions w)
+              [ buildCategoryMonth (wAccounts w) (catId c) (wMonth w) zeroCents (wAssignments w) (wTransactions w)
               | c <- wCategories w
               ]
             rta = readyToAssign zeroCents (wAccounts w) (wMonth w) (wAssignments w) (wTransactions w)

@@ -23,4 +23,11 @@ data DomainError
     -- 'Db.Transaction.insertTransfer', which looks up the two accounts
     -- and checks 'Domain.Account.sameBudgetStatus'.
     TransferRequiresMatchingBudgetStatus
+  | -- | A 'Domain.Transaction.Categorized' transaction was attempted on
+    -- a tracking account. Would also break invariant 1 (a tracking
+    -- account's balance is excluded from 'Domain.Budget.onBudgetBalanceTotal',
+    -- but its categorized activity would still count toward
+    -- 'Domain.Budget.categoryActivity'/'available'). Enforced by
+    -- 'Db.Transaction.insertSpending'.
+    CategorizedTransactionRequiresOnBudgetAccount
   deriving stock (Eq, Show)

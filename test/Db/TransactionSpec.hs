@@ -15,7 +15,13 @@ import Db.Transaction
   )
 import Domain.Account (Account (accId))
 import Domain.Category (Category (catId), CategoryGroup (cgId))
-import Domain.Error (DomainError (TransferRequiresDistinctAccounts, TransferRequiresMatchingBudgetStatus))
+import Domain.Error
+  ( DomainError
+      ( CategorizedTransactionRequiresOnBudgetAccount
+      , TransferRequiresDistinctAccounts
+      , TransferRequiresMatchingBudgetStatus
+      )
+  )
 import Domain.Transaction
   ( Categorization (Categorized, Inflow)
   , Transaction (txCategorization, txId)
@@ -47,10 +53,20 @@ spec = around withTestDb $
       cat1 <- insertCategory conn (cgId group) "Supermarket" >>= expectRight
       cat2 <- insertCategory conn (cgId group) "Drugstore" >>= expectRight
       let lines' = TransactionLine (catId cat1) (cents (-3000)) :| [TransactionLine (catId cat2) (cents (-500))]
-      tx <- insertSpending conn (accId acc) (fromGregorian 2026 1 5) "Supermarket" Uncleared lines' Nothing
+      tx <- insertSpending conn (accId acc) (fromGregorian 2026 1 5) "Supermarket" Uncleared lines' Nothing >>= expectRight
       txCategorization tx `shouldBe` Categorized lines'
       found <- getTransaction conn (txId tx)
       found `shouldBe` Just tx
+
+    it "insertSpending on a tracking account is rejected, without adding rows" $ \conn -> do
+      tracking <- insertAccount conn "Investments" Tracking >>= expectRight
+      group <- insertCategoryGroup conn "Groceries" >>= expectRight
+      cat <- insertCategory conn (cgId group) "Supermarket" >>= expectRight
+      let lines' = TransactionLine (catId cat) (cents (-3000)) :| []
+      result <- insertSpending conn (accId tracking) (fromGregorian 2026 1 5) "Supermarket" Uncleared lines' Nothing
+      result `shouldBe` Left CategorizedTransactionRequiresOnBudgetAccount
+      existing <- listTransactionsForAccount conn (accId tracking)
+      existing `shouldBe` []
 
     it "insertTransfer between two on-budget accounts round-trips fully and sums to 0" $ \conn -> do
       from <- insertAccount conn "Checking Account" Checking >>= expectRight

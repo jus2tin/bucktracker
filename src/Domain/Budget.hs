@@ -81,11 +81,19 @@ nextCarriedIn :: CategoryMonth -> Cents
 nextCarriedIn = rolloverCarry . rolloverCategoryMonth
 
 -- | Sum of the transaction lines for one category, in one month.
-categoryActivity :: CategoryId -> YearMonth -> [Transaction] -> Cents
-categoryActivity cid month txs = mconcat
+--
+-- Takes @accounts@ purely as defense-in-depth: 'Db.Transaction.insertSpending'
+-- already rejects a 'Categorized' transaction on a non-on-budget account
+-- before it's ever persisted, but this function has no way to know
+-- that's true of its @txs@ argument — a future caller assembling @txs@
+-- some other way shouldn't be able to silently break invariant 1 just by
+-- including a tracking account's transactions. Mirrors 'accountInflows'.
+categoryActivity :: [Account] -> CategoryId -> YearMonth -> [Transaction] -> Cents
+categoryActivity accounts cid month txs = mconcat
   [ tlAmount l
   | tx <- txs
   , dayToYearMonth (txDate tx) == month
+  , isOnBudgetAccountIn accounts (txAccount tx)
   , Categorized ls <- [txCategorization tx]
   , l <- toList ls
   , tlCategory l == cid
@@ -96,13 +104,13 @@ categoryActivity cid month txs = mconcat
 -- month ('nextCarriedIn' on the previous 'CategoryMonth'), or is
 -- 'zeroCents' for the very first month.
 buildCategoryMonth
-  :: CategoryId -> YearMonth -> Cents -> [Assignment] -> [Transaction] -> CategoryMonth
-buildCategoryMonth cid month carriedIn assignments txs = CategoryMonth
+  :: [Account] -> CategoryId -> YearMonth -> Cents -> [Assignment] -> [Transaction] -> CategoryMonth
+buildCategoryMonth accounts cid month carriedIn assignments txs = CategoryMonth
   { cmCategory  = cid
   , cmMonth     = month
   , cmAssigned  = mconcat
       [ asgAmount a | a <- assignments, asgCategory a == cid, asgMonth a == month ]
-  , cmActivity  = categoryActivity cid month txs
+  , cmActivity  = categoryActivity accounts cid month txs
   , cmCarriedIn = carriedIn
   }
 
@@ -117,10 +125,12 @@ accountInflows accounts month txs = mconcat
   | tx <- txs
   , dayToYearMonth (txDate tx) == month
   , Inflow amount <- [txCategorization tx]
-  , isOnBudgetAccount (txAccount tx)
+  , isOnBudgetAccountIn accounts (txAccount tx)
   ]
-  where
-    isOnBudgetAccount aid = any (\a -> accId a == aid && isOnBudget a) accounts
+
+-- | Shared by 'accountInflows' and 'categoryActivity'.
+isOnBudgetAccountIn :: [Account] -> AccountId -> Bool
+isOnBudgetAccountIn accounts aid = any (\a -> accId a == aid && isOnBudget a) accounts
 
 -- | Balance of one account: sum of all transaction amounts on it.
 accountBalance :: AccountId -> [Transaction] -> Cents
