@@ -29,6 +29,10 @@ source-repository head
 
 library
   exposed-modules:
+      Api
+      Api.Accounts
+      Api.Html
+      Api.Monad
       Config
       Db.Account
       Db.Assignment
@@ -58,6 +62,7 @@ library
       TypeOperators
       DerivingStrategies
       DerivingVia
+      DeriveAnyClass
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wunused-packages
   build-depends:
       aeson
@@ -68,16 +73,19 @@ library
     , directory
     , envparse
     , filepath
+    , http-api-data
     , lucid
     , mtl
     , resource-pool
     , servant
+    , servant-lucid
     , servant-server
     , sqlite-simple
     , text
     , time
     , transformers
     , uuid
+    , wai
     , warp
   default-language: GHC2021
 
@@ -95,18 +103,22 @@ executable bucktracker-exe
       TypeOperators
       DerivingStrategies
       DerivingVia
+      DeriveAnyClass
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wunused-packages -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , bucktracker
     , text
     , time
+    , warp
   default-language: GHC2021
 
 test-suite bucktracker-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      Api.AccountsSpec
+      Api.Setup
       Db.AccountSpec
       Db.AssignmentSpec
       Db.BackupSpec
@@ -131,6 +143,7 @@ test-suite bucktracker-test
       TypeOperators
       DerivingStrategies
       DerivingVia
+      DeriveAnyClass
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wunused-packages -threaded -rtsopts -with-rtsopts=-N
   build-tool-depends:
       hspec-discover:hspec-discover
@@ -138,10 +151,14 @@ test-suite bucktracker-test
       QuickCheck
     , base >=4.7 && <5
     , bucktracker
+    , bytestring
     , directory
     , hspec
     , hspec-wai
+    , http-types
     , sqlite-simple
     , text
     , time
+    , wai
+    , wai-extra
   default-language: GHC2021

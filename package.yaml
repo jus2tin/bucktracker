@@ -36,6 +36,7 @@ default-extensions:
 - TypeOperators
 - DerivingStrategies
 - DerivingVia
+- DeriveAnyClass
 
 ghc-options:
 - -Wall
@@ -51,26 +52,25 @@ ghc-options:
 
 library:
   source-dirs: src
-  # Fase 3 (Api/) dependencies staan hier al klaar (zie DECISIONS.md §1 en §6):
-  # servant/servant-server/warp/lucid/mtl/transformers/uuid/aeson worden pas
-  # echt gebruikt zodra Api/ geschreven is, tot die tijd geeft
-  # -Wunused-packages hier terecht een warning (geen -Werror lokaal).
   dependencies:
   - aeson
   - bytestring
   - containers
-  - direct-sqlite  # voor Db.Backup: de online backup API zit niet in sqlite-simple zelf
-  - directory       # XDG-datapad voor het standaard DB-bestand
+  - direct-sqlite    # voor Db.Backup: de online backup API zit niet in sqlite-simple zelf
+  - directory        # XDG-datapad voor het standaard DB-bestand
   - envparse
   - filepath
+  - http-api-data     # Web.FormUrlEncoded (FromForm) voor HTMX-formulieren
   - lucid
   - mtl
   - resource-pool
   - servant
+  - servant-lucid     # MimeRender HTML (Html ()) voor Servant-handlers
   - servant-server
   - sqlite-simple
   - transformers
   - uuid
+  - wai
   - warp
 
 executables:
@@ -83,6 +83,7 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - bucktracker
+    - warp
 
 tests:
   bucktracker-test:
@@ -101,3 +102,7 @@ tests:
     - hspec-wai
     - sqlite-simple
     - directory
+    - wai
+    - wai-extra
+    - http-types
+    - bytestring
