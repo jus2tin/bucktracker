@@ -1,7 +1,6 @@
 module Api.AccountsSpec (spec) where
 
 import Api.Setup (withTestApp)
-import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import Data.List (isInfixOf)
 import Network.HTTP.Types (hLocation)
