@@ -20,6 +20,8 @@ build-type:     Simple
 extra-source-files:
     README.md
     CHANGELOG.md
+data-files:
+    migrations/0001_initial.sql
 
 source-repository head
   type: git
@@ -27,6 +29,15 @@ source-repository head
 
 library
   exposed-modules:
+      Config
+      Db.Account
+      Db.Assignment
+      Db.Backup
+      Db.Category
+      Db.Field
+      Db.Migrations
+      Db.Pool
+      Db.Transaction
       Domain
       Domain.Account
       Domain.Budget
@@ -34,6 +45,7 @@ library
       Domain.Error
       Domain.Transaction
       Domain.Types
+      Domain.Validation
   other-modules:
       Paths_bucktracker
   hs-source-dirs:
@@ -52,8 +64,13 @@ library
     , base >=4.7 && <5
     , bytestring
     , containers
+    , direct-sqlite
+    , directory
+    , envparse
+    , filepath
     , lucid
     , mtl
+    , resource-pool
     , servant
     , servant-server
     , sqlite-simple
@@ -90,6 +107,13 @@ test-suite bucktracker-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      Db.AccountSpec
+      Db.AssignmentSpec
+      Db.BackupSpec
+      Db.CategorySpec
+      Db.MigrationsSpec
+      Db.Setup
+      Db.TransactionSpec
       Domain.AccountSpec
       Domain.BudgetSpec
       Domain.CategorySpec
@@ -114,8 +138,10 @@ test-suite bucktracker-test
       QuickCheck
     , base >=4.7 && <5
     , bucktracker
+    , directory
     , hspec
     , hspec-wai
+    , sqlite-simple
     , text
     , time
   default-language: GHC2021
