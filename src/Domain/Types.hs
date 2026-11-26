@@ -33,7 +33,11 @@ module Domain.Types
     -- * Enums
   , AccountType (..)
   , isOnBudgetType
+  , accountTypeToText
+  , accountTypeFromText
   , TransactionStatus (..)
+  , transactionStatusToText
+  , transactionStatusFromText
   ) where
 
 import Data.Int (Int64)
@@ -146,5 +150,32 @@ isOnBudgetType :: AccountType -> Bool
 isOnBudgetType Tracking = False
 isOnBudgetType _        = True
 
+-- | Canonieke tekstrepresentatie, gebruikt zowel als SQLite TEXT-waarde
+-- (Db.Field) als HTML-formulierwaarde (Api) — één bron van waarheid in
+-- plaats van de mapping op twee plekken te dupliceren.
+accountTypeToText :: AccountType -> Text
+accountTypeToText Checking = "checking"
+accountTypeToText Savings  = "savings"
+accountTypeToText Cash     = "cash"
+accountTypeToText Tracking = "tracking"
+
+accountTypeFromText :: Text -> Maybe AccountType
+accountTypeFromText "checking" = Just Checking
+accountTypeFromText "savings"  = Just Savings
+accountTypeFromText "cash"     = Just Cash
+accountTypeFromText "tracking" = Just Tracking
+accountTypeFromText _          = Nothing
+
 data TransactionStatus = Uncleared | Cleared | Reconciled
   deriving stock (Eq, Ord, Show, Enum, Bounded)
+
+transactionStatusToText :: TransactionStatus -> Text
+transactionStatusToText Uncleared  = "uncleared"
+transactionStatusToText Cleared    = "cleared"
+transactionStatusToText Reconciled = "reconciled"
+
+transactionStatusFromText :: Text -> Maybe TransactionStatus
+transactionStatusFromText "uncleared"  = Just Uncleared
+transactionStatusFromText "cleared"    = Just Cleared
+transactionStatusFromText "reconciled" = Just Reconciled
+transactionStatusFromText _            = Nothing

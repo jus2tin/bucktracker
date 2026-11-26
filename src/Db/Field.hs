@@ -71,7 +71,10 @@ instance FromField Cents where
   fromField f = cents <$> fromField f
 
 -- * Enums, als TEXT (leesbaar in een DB-browser, en de SQL CHECK-
--- constraints in de migraties leggen dezelfde geldige waarden vast).
+-- constraints in de migraties leggen dezelfde geldige waarden vast). De
+-- tekst <-> waarde-mapping zelf staat in Domain.Types (canoniek, ook
+-- gebruikt door de Api-laag voor formulierwaarden) — hier alleen de
+-- koppeling aan FromField/ToField.
 
 instance ToField AccountType where
   toField = SQLText . accountTypeToText
@@ -79,35 +82,11 @@ instance ToField AccountType where
 instance FromField AccountType where
   fromField = parseTextField "AccountType" accountTypeFromText
 
-accountTypeToText :: AccountType -> Text.Text
-accountTypeToText Checking = "checking"
-accountTypeToText Savings  = "savings"
-accountTypeToText Cash     = "cash"
-accountTypeToText Tracking = "tracking"
-
-accountTypeFromText :: Text.Text -> Maybe AccountType
-accountTypeFromText "checking" = Just Checking
-accountTypeFromText "savings"  = Just Savings
-accountTypeFromText "cash"     = Just Cash
-accountTypeFromText "tracking" = Just Tracking
-accountTypeFromText _          = Nothing
-
 instance ToField TransactionStatus where
   toField = SQLText . transactionStatusToText
 
 instance FromField TransactionStatus where
   fromField = parseTextField "TransactionStatus" transactionStatusFromText
-
-transactionStatusToText :: TransactionStatus -> Text.Text
-transactionStatusToText Uncleared  = "uncleared"
-transactionStatusToText Cleared    = "cleared"
-transactionStatusToText Reconciled = "reconciled"
-
-transactionStatusFromText :: Text.Text -> Maybe TransactionStatus
-transactionStatusFromText "uncleared"  = Just Uncleared
-transactionStatusFromText "cleared"    = Just Cleared
-transactionStatusFromText "reconciled" = Just Reconciled
-transactionStatusFromText _            = Nothing
 
 -- | Gedeelde helper voor "TEXT-kolom met een vaste set geldige waarden".
 parseTextField :: Typeable a => String -> (Text.Text -> Maybe a) -> Field -> Ok a
