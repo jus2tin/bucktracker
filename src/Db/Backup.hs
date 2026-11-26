@@ -1,11 +1,12 @@
--- | Backup via SQLite's online backup API (zie DECISIONS.md §7): kopieert
--- de database naar een ander bestand terwijl de app 'm nog gebruikt,
--- zonder dat de bron op slot gaat voor schrijvers (in tegenstelling tot
--- een losse bestandskopie van het .db-bestand).
+-- | Backup via SQLite's online backup API (see DECISIONS.md §7): copies
+-- the database to another file while the app is still using it, without
+-- locking the source against writers (unlike a plain file copy of the
+-- .db file).
 --
--- sqlite-simple zelf heeft deze API niet; we gaan via 'connectionHandle'
--- naar de onderliggende direct-sqlite 'Database' — expliciet toegestaan
--- door sqlite-simple voor precies dit soort functionaliteit.
+-- sqlite-simple itself doesn't have this API; we go via
+-- 'connectionHandle' to the underlying direct-sqlite 'Database' —
+-- explicitly sanctioned by sqlite-simple for exactly this kind of
+-- functionality.
 module Db.Backup
   ( backupTo
   ) where
@@ -15,7 +16,7 @@ import qualified Data.Text as Text
 import Database.SQLite.Simple (Connection, connectionHandle)
 import qualified Database.SQLite3 as Raw
 
--- | Maakt een consistente kopie van de database naar het gegeven pad.
+-- | Makes a consistent copy of the database at the given path.
 backupTo :: Connection -> FilePath -> IO ()
 backupTo conn destPath =
   bracket (Raw.open (Text.pack destPath)) Raw.close $ \dest ->
@@ -25,7 +26,7 @@ backupTo conn destPath =
       stepUntilDone
   where
     stepUntilDone backup = do
-      result <- Raw.backupStep backup (-1) -- -1: zoveel mogelijk pagina's in één keer
+      result <- Raw.backupStep backup (-1) -- -1: as many pages as possible at once
       case result of
         Raw.BackupDone -> pure ()
         Raw.BackupOK   -> stepUntilDone backup

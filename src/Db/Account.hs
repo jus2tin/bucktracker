@@ -27,10 +27,10 @@ import Domain.Validation (nonEmptyName)
 instance FromRow Account where
   fromRow = Account <$> field <*> field <*> field <*> field
 
--- | Valideert de naam en voegt, als die geldig is, een nieuwe rekening toe.
--- Het echte ID komt van SQLite (@rowid@), dus de validatie gebeurt vóór de
--- insert, zonder een nep-ID te hoeven verzinnen om 'Domain.Account.mkAccount'
--- aan te roepen (zie Domain.Validation).
+-- | Validates the name and, if it's valid, inserts a new account. The
+-- real ID comes from SQLite (@rowid@), so validation happens before the
+-- insert, without having to make up a fake ID to call
+-- 'Domain.Account.mkAccount' (see Domain.Validation).
 insertAccount :: Connection -> Text -> AccountType -> IO (Either DomainError Account)
 insertAccount conn name ty = case nonEmptyName "account" name of
   Left err -> pure (Left err)
