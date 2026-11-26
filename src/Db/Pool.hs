@@ -10,9 +10,10 @@ module Db.Pool
   ( Pool
   , createPool
   , withConnection
+  , closePool
   ) where
 
-import Data.Pool (Pool, defaultPoolConfig, newPool, withResource)
+import Data.Pool (Pool, defaultPoolConfig, destroyAllResources, newPool, withResource)
 import Database.SQLite.Simple (Connection, close, execute_, open)
 import Db.Migrations (runMigrations)
 
@@ -38,3 +39,11 @@ openConfigured dbPath = do
 
 withConnection :: Pool Connection -> (Connection -> IO a) -> IO a
 withConnection = withResource
+
+-- | Sluit alle connecties in de pool. Vooral relevant in tests: een
+-- bestands-backed db (nodig zodra meerdere pool-connecties dezelfde data
+-- moeten zien, want @:memory:@ is per connectie een eigen lege db) moet
+-- hier doorheen vóórdat het tijdelijke bestand verwijderd wordt — anders
+-- blokkeert dat op Windows op een nog openstaande handle.
+closePool :: Pool Connection -> IO ()
+closePool = destroyAllResources
