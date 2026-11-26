@@ -1,5 +1,7 @@
+# Haskell / Stack / Cabal build artifacts
 dist
 dist-*
+dist-newstyle/
 cabal-dev
 *.o
 *.hi
@@ -21,3 +23,26 @@ cabal.project.local
 cabal.project.local~
 .HTF/
 .ghc.environment.*
+
+# Editor / tooling
+.vscode/
+.idea/
+.hie/
+tags
+TAGS
+*.swp
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Local runtime data / config — nooit de echte DB of secrets committen.
+# (default pad is buiten de repo, %APPDATA%\bucktracker\, maar voor de
+# zekerheid: negeer ook lokale DB-bestanden/.env als die per ongeluk in de
+# projectmap belanden, bv. tijdens handmatig testen van de Db/-laag.)
+*.sqlite
+*.sqlite3
+*.db
+.env
+.env.*
