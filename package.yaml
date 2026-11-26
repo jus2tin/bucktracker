@@ -106,3 +106,4 @@ tests:
     - wai-extra
     - http-types
     - bytestring
+    - filepath

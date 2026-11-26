@@ -124,6 +124,7 @@ test-suite bucktracker-test
       Db.BackupSpec
       Db.CategorySpec
       Db.MigrationsSpec
+      Db.PoolSpec
       Db.Setup
       Db.TransactionSpec
       Domain.AccountSpec
@@ -153,6 +154,7 @@ test-suite bucktracker-test
     , bucktracker
     , bytestring
     , directory
+    , filepath
     , hspec
     , hspec-wai
     , http-types
