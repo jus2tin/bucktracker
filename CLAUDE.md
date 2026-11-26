@@ -1,50 +1,56 @@
 # Project: Bucktracker
-Persoonlijke zero-based / envelope budget- en geldtracker (YNAB-alternatief) gebouwd in Haskell met Servant.
+Personal zero-based / envelope budget and money tracker (YNAB alternative) built in Haskell with Servant.
 
-Zie `DECISIONS.md` voor de volledige onderbouwing van alle keuzes hieronder,
-inclusief bekende v0.1-beperkingen en wat er bewust nog openstaat.
+## Language
+This is an English-language project: code, identifiers, comments, documentation
+(including this file and `DECISIONS.md`), commit messages, and PR descriptions
+are all written in English, regardless of what language the conversation
+driving the work happens to be in.
+
+See `DECISIONS.md` for the full reasoning behind every choice below,
+including known v0.1 limitations and what's deliberately still open.
 
 ## Tech Stack & Libraries
 - **Build tool:** Stack, resolver `lts-24.68` (GHC 9.10.3).
 - **Web framework:** Servant (`servant-server`, `warp`).
-- **Database:** SQLite via `sqlite-simple` — handgeschreven, genummerde `.sql`-migraties
-  en expliciete `FromRow`/`ToRow`-instances. Geen `persistent`/`beam`/`selda`, geen TemplateHaskell.
-- **JSON:** `aeson` (gebruik `Generic` + `DerivingVia` of expliciete instances, geen `TemplateHaskell`).
-- **Frontend:** Servant + Lucid + HTMX. Server-rendered HTML, geen npm/JS-buildstap.
-- **Auth:** Geen auth in v0.1 (draait alleen op localhost). Handlers lopen wel al in
-  `ReaderT AppEnv Handler` (via `hoistServer`) zodat ze zonder een draaiende server testbaar zijn.
-- **Config:** Env vars. Defaults: poort `8080`, SQLite-pad `%APPDATA%\bucktracker\bucktracker.db`
-  op Windows (configureerbaar, zodat Linux later triviaal is).
-- **Tekst & Tijd:** Altijd `Data.Text` (strict) en `Data.Time` (`UTCTime` / `Day`). Geen `String` behalve aan de randen voor CLI/config.
+- **Database:** SQLite via `sqlite-simple` — hand-written, numbered `.sql` migrations
+  and explicit `FromRow`/`ToRow` instances. No `persistent`/`beam`/`selda`, no TemplateHaskell.
+- **JSON:** `aeson` (use `Generic` + `DerivingVia` or explicit instances, no `TemplateHaskell`).
+- **Frontend:** Servant + Lucid + HTMX. Server-rendered HTML, no npm/JS build step.
+- **Auth:** No auth in v0.1 (runs on localhost only). Handlers already run in
+  `ReaderT AppEnv Handler` (via `hoistServer`) so they're testable without a running server.
+- **Config:** Env vars. Defaults: port `8080`, SQLite path `%APPDATA%\bucktracker\bucktracker.db`
+  on Windows (configurable, so a later Linux port is trivial).
+- **Text & Time:** Always `Data.Text` (strict) and `Data.Time` (`UTCTime` / `Day`). No `String` except at the edges for CLI/config.
 
-## Architectuur & Mappenstructuur
-- `app/Main.hs`: Entrypoint, config laden, DB-connectie en Warp-server starten.
-- `src/Api/`: Servant API-type definities en route-handlers (dun houden, alleen HTTP-vertaling).
-- `src/Domain/`: Pure business logic, domeintypes, validatie en berekeningen (geen `IO` of DB-calls).
-- `src/Db/`: Database-queries en schema-definities.
-- `test/`: `hspec` + `QuickCheck` tests (focus op domeinlogica en budget-invarianten), via `hspec-discover`.
+## Architecture & Directory Structure
+- `app/Main.hs`: Entry point, loads config, sets up the DB connection and starts the Warp server.
+- `src/Api/`: Servant API type definitions and route handlers (keep thin, HTTP translation only).
+- `src/Domain/`: Pure business logic, domain types, validation and calculations (no `IO` or DB calls).
+- `src/Db/`: Database queries and schema definitions.
+- `test/`: `hspec` + `QuickCheck` tests (focused on domain logic and budget invariants), via `hspec-discover`.
 
-## Coding Standards (Strikt)
-- **Total functions only:** Gebruik NOOIT `head`, `tail`, `fromJust`, `read`, of `error` in productiecode. Gebruik pattern matching, `Maybe`, `Either`, of `NonEmpty`.
-- **Type-safety:** Gebruik `newtype` wrappers voor ID's (`AccountId`, `CategoryId`, `CategoryGroupId`, `TransactionId`, `TransferId`) en geldbedragen (`Cents` als `Int64`, NOOIT `Double` of `Float` voor valuta). Maak illegale states onrepresenteerbaar waar mogelijk (bv. `NonEmpty` voor split-regels) in plaats van ze te valideren.
-- **Language extensions:** `language: GHC2021` + `default-extensions`: `OverloadedStrings`, `StrictData`, `DeriveGeneric`, `DataKinds`, `TypeOperators`, `DerivingStrategies`, `DerivingVia` (in `package.yaml`).
-- **Compiler flags:** `-Wall -Wmissing-export-lists -Wunused-packages` lokaal; `-Werror` alleen in CI (zie `DECISIONS.md` §6 voor waarom dat nu nog niet lokaal aan staat).
-- **Error handling:** Gebruik `ExceptT` / `ServantError` alleen in de API-laag; in het domein pure `Either DomainError a` (zie `src/Domain/Error.hs`) of, waar een waarde nooit ongeldig kan zijn, een gewone totale functie.
+## Coding Standards (Strict)
+- **Total functions only:** NEVER use `head`, `tail`, `fromJust`, `read`, or `error` in production code. Use pattern matching, `Maybe`, `Either`, or `NonEmpty`.
+- **Type safety:** Use `newtype` wrappers for IDs (`AccountId`, `CategoryId`, `CategoryGroupId`, `TransactionId`, `TransferId`) and money amounts (`Cents` as `Int64`, NEVER `Double` or `Float` for currency). Make illegal states unrepresentable wherever possible (e.g. `NonEmpty` for split lines) instead of validating them.
+- **Language extensions:** `language: GHC2021` + `default-extensions`: `OverloadedStrings`, `StrictData`, `DeriveGeneric`, `DataKinds`, `TypeOperators`, `DerivingStrategies`, `DerivingVia`, `DeriveAnyClass` (in `package.yaml`).
+- **Compiler flags:** `-Wall -Wmissing-export-lists -Wunused-packages` locally; `-Werror` only in CI (see `DECISIONS.md` §6 for why that isn't on locally yet).
+- **Error handling:** Use `ExceptT` / `ServantError` only in the API layer; in the domain, pure `Either DomainError a` (see `src/Domain/Error.hs`), or, where a value can never be invalid, a plain total function.
 
-## Build & Test Commando's
+## Build & Test Commands
 - Build: `stack build --fast`
 - Test: `stack test`
 - Run: `stack run`
-- Linter/Formatter (indien aanwezig): `hlint src/` en `ormolu --mode inplace src/`
+- Linter/Formatter (if present): `hlint src/` and `ormolu --mode inplace src/`
 
-## Domeinregels (Bucktracker)
-Samenvatting — volledige uitwerking en edge cases staan in `DECISIONS.md` §3-5.
+## Domain Rules (Bucktracker)
+Summary — full detail and edge cases live in `DECISIONS.md` §3-5.
 
-- Alle bedragen worden opgeslagen en berekend in gehele centen (`Int64`), altijd EUR.
-- **Rekeningen:** `OnBudget` (Checking/Savings/Cash) vs. `Tracking`. Beginstand = een `Inflow`-transactie naar Ready to Assign, geen apart veld.
-- **Categorieën:** twee niveaus (`CategoryGroup -> Category`), periode = kalendermaand.
-- **Maandovergang:** positief categoriesaldo rolt door; negatief saldo reset naar 0 en wordt afgetrokken van Ready to Assign van de volgende maand.
-- **Transacties:** uitgaven negatief / inkomsten positief. Elke transactie is `Categorized` (één of meer categorieën, via `NonEmpty`), `Inflow` (ongecategoriseerd, naar Ready to Assign) of de helft van een `Transfer` (twee legs, gedeelde `TransferId`, som = 0, geen categorie-impact).
-- **Status:** `Uncleared | Cleared | Reconciled`; reconciliatie is een pure vergelijking, geen apart type.
-- **Payee:** vrije `Text` op de transactie in v0.1, geen aparte tabel.
-- **5 harde invarianten** (QuickCheck in `test/Domain/`): zie `DECISIONS.md` §5.
+- All amounts are stored and calculated in whole cents (`Int64`), always EUR.
+- **Accounts:** `OnBudget` (Checking/Savings/Cash) vs. `Tracking`. Opening balance = an `Inflow` transaction into Ready to Assign, not a separate field.
+- **Categories:** two levels (`CategoryGroup -> Category`), period = calendar month.
+- **Month rollover:** a positive category balance carries forward; a negative balance resets to 0 and is deducted from the next month's Ready to Assign.
+- **Transactions:** expenses negative / income positive. Every transaction is `Categorized` (one or more categories, via `NonEmpty`), `Inflow` (uncategorized, goes to Ready to Assign), or one half of a `Transfer` (two legs, shared `TransferId`, sum = 0, no category impact).
+- **Status:** `Uncleared | Cleared | Reconciled`; reconciliation is a pure comparison, not a separate type.
+- **Payee:** free-form `Text` on the transaction in v0.1, no separate table.
+- **5 hard invariants** (QuickCheck in `test/Domain/`): see `DECISIONS.md` §5.
