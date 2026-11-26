@@ -10,6 +10,12 @@ extra-source-files:
 - README.md
 - CHANGELOG.md
 
+# Migraties zijn losse, reviewbare .sql-bestanden (geen TemplateHaskell/
+# file-embed): ze worden via data-files meegeïnstalleerd en op runtime
+# gevonden via het gegenereerde Paths_bucktracker-module. Zie DECISIONS.md §7.
+data-files:
+- migrations/*.sql
+
 synopsis:            Persoonlijke zero-based / envelope budget- en geldtracker
 category:            Finance
 
@@ -45,15 +51,21 @@ ghc-options:
 
 library:
   source-dirs: src
-  # Fase 2/3 dependencies staan hier al klaar (zie DECISIONS.md §1 en §6):
-  # ze worden pas echt gebruikt zodra Db/ en Api/ geschreven zijn, tot die
-  # tijd geeft -Wunused-packages hier terecht een warning (geen -Werror lokaal).
+  # Fase 3 (Api/) dependencies staan hier al klaar (zie DECISIONS.md §1 en §6):
+  # servant/servant-server/warp/lucid/mtl/transformers/uuid/aeson worden pas
+  # echt gebruikt zodra Api/ geschreven is, tot die tijd geeft
+  # -Wunused-packages hier terecht een warning (geen -Werror lokaal).
   dependencies:
   - aeson
   - bytestring
   - containers
+  - direct-sqlite  # voor Db.Backup: de online backup API zit niet in sqlite-simple zelf
+  - directory       # XDG-datapad voor het standaard DB-bestand
+  - envparse
+  - filepath
   - lucid
   - mtl
+  - resource-pool
   - servant
   - servant-server
   - sqlite-simple
@@ -87,3 +99,5 @@ tests:
     - hspec
     - QuickCheck
     - hspec-wai
+    - sqlite-simple
+    - directory

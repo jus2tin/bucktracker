@@ -1,0 +1,267 @@
+module Db.Transaction
+  ( insertInflow
+  , insertSpending
+  , insertTransfer
+  , getTransaction
+  , listTransactionsForAccount
+  , listTransactionsInMonth
+  ) where
+
+import Control.Exception (Exception, throwIO)
+import Control.Monad (forM_)
+import Data.List.NonEmpty (NonEmpty (..), toList)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Data.Time (Day, fromGregorian, getCurrentTime)
+import Database.SQLite.Simple
+  ( Connection
+  , FromRow (..)
+  , Only (Only)
+  , execute
+  , field
+  , lastInsertRowId
+  , query
+  , withTransaction
+  )
+import Db.Account (getAccount)
+import Db.Field ()
+import Domain.Account (Account, sameBudgetStatus)
+import Domain.Error (DomainError (..))
+import Domain.Transaction
+  ( Categorization (Categorized, Inflow, TransferLeg)
+  , Transaction (..)
+  , TransactionLine (TransactionLine, tlAmount, tlCategory)
+  , mkInflowTransaction
+  , mkSpendingTransaction
+  )
+import Domain.Types
+  ( AccountId
+  , Cents
+  , ImportHash
+  , TransactionId (TransactionId)
+  , TransactionStatus
+  , TransferId (TransferId)
+  , YearMonth
+  , negateCents
+  , nextYearMonth
+  , ymMonth
+  , ymYear
+  )
+
+-- | Gooit alleen als een rij een vorm heeft die, gegeven de CHECK-
+-- constraints in de migraties, onmogelijk zou moeten zijn (bv. kind =
+-- 'inflow' maar amount is NULL). Geen stille foutieve default: dat zou
+-- data corrumperen; een gewone 'error'/'fromJust' zou dan weer de
+-- total-functions-regel breken. Dit is het IO-equivalent: een expliciete,
+-- getypeerde, catchable exceptie.
+newtype CorruptRow = CorruptRow Text deriving stock (Show)
+instance Exception CorruptRow
+
+requireField :: Text -> Maybe a -> IO a
+requireField label = maybe (throwIO (CorruptRow label)) pure
+
+-- Platte rij-representatie van de transactions-tabel, vóór samenvoeging
+-- met transaction_lines (voor 'Categorized') tot een echte 'Transaction'.
+data TransactionRow = TransactionRow
+  { trId          :: TransactionId
+  , trAccount     :: AccountId
+  , trDate        :: Day
+  , trPayee       :: Text
+  , trStatus      :: TransactionStatus
+  , trKind        :: Text
+  , trAmount      :: Maybe Cents
+  , trTransferId  :: Maybe TransferId
+  , trCounterpart :: Maybe AccountId
+  , trImportHash  :: Maybe ImportHash
+  }
+
+instance FromRow TransactionRow where
+  fromRow =
+    TransactionRow
+      <$> field <*> field <*> field <*> field <*> field
+      <*> field <*> field <*> field <*> field <*> field
+
+instance FromRow TransactionLine where
+  fromRow = TransactionLine <$> field <*> field
+
+rowToTransaction :: Connection -> TransactionRow -> IO Transaction
+rowToTransaction conn row = do
+  categorization <- case trKind row of
+    "inflow" -> Inflow <$> requireField "transactions.amount (kind=inflow)" (trAmount row)
+    "transfer" ->
+      TransferLeg
+        <$> requireField "transactions.transfer_id (kind=transfer)" (trTransferId row)
+        <*> requireField "transactions.counterpart_account_id (kind=transfer)" (trCounterpart row)
+        <*> requireField "transactions.amount (kind=transfer)" (trAmount row)
+    _ -> Categorized <$> fetchLines conn (trId row)
+  pure
+    Transaction
+      { txId = trId row
+      , txAccount = trAccount row
+      , txDate = trDate row
+      , txPayee = trPayee row
+      , txStatus = trStatus row
+      , txCategorization = categorization
+      , txImportHash = trImportHash row
+      }
+
+fetchLines :: Connection -> TransactionId -> IO (NonEmpty TransactionLine)
+fetchLines conn txId' = do
+  rows <-
+    query
+      conn
+      "SELECT category_id, amount FROM transaction_lines WHERE transaction_id = ? ORDER BY id"
+      (Only txId')
+  case rows of
+    (x : xs) -> pure (x :| xs)
+    [] ->
+      throwIO
+        (CorruptRow ("transaction_lines has none for kind='categorized' transaction " <> Text.pack (show txId')))
+
+-- | Bedrag en payee volgen uit 'Domain.Transaction.mkInflowTransaction' —
+-- de insert bouwt alleen de rij, het domeinobject komt uit dezelfde smart
+-- constructor als in Fase 1.
+insertInflow
+  :: Connection
+  -> AccountId
+  -> Day
+  -> Text
+  -> TransactionStatus
+  -> Cents
+  -> Maybe ImportHash
+  -> IO Transaction
+insertInflow conn accId day payee status amount importHash = do
+  execute
+    conn
+    ( "INSERT INTO transactions (account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash) \
+      \VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)"
+    )
+    (accId, day, payee, status, "inflow" :: Text, amount, importHash)
+  txId' <- TransactionId <$> lastInsertRowId conn
+  pure (mkInflowTransaction txId' accId day payee status amount importHash)
+
+insertSpending
+  :: Connection
+  -> AccountId
+  -> Day
+  -> Text
+  -> TransactionStatus
+  -> NonEmpty TransactionLine
+  -> Maybe ImportHash
+  -> IO Transaction
+insertSpending conn accId day payee status lines' importHash = withTransaction conn $ do
+  execute
+    conn
+    ( "INSERT INTO transactions (account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash) \
+      \VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?)"
+    )
+    (accId, day, payee, status, "categorized" :: Text, importHash)
+  txId' <- TransactionId <$> lastInsertRowId conn
+  forM_ (toList lines') $ \line ->
+    execute
+      conn
+      "INSERT INTO transaction_lines (transaction_id, category_id, amount) VALUES (?, ?, ?)"
+      (txId', tlCategory line, tlAmount line)
+  pure (mkSpendingTransaction txId' accId day payee status lines' importHash)
+
+-- | De twee legs van een transfer. Valideert, in deze volgorde:
+-- (1) de twee rekeningen moeten verschillen (zelfde check als Fase 1's
+-- pure @mkTransferPair@); (2) ze moeten dezelfde budget-status hebben
+-- ('sameBudgetStatus') — dit is de in Fase 2 nieuw afgedwongen regel uit
+-- DECISIONS.md §3/§7. Beide legs worden in één transactie ingevoegd.
+insertTransfer
+  :: Connection
+  -> (AccountId, AccountId) -- ^ (van, naar)
+  -> Day
+  -> TransactionStatus
+  -> Cents -- ^ het overgemaakte bedrag, als positief bedrag
+  -> IO (Either DomainError (Transaction, Transaction))
+insertTransfer conn (fromAccId, toAccId) day status amount
+  | fromAccId == toAccId = pure (Left TransferRequiresDistinctAccounts)
+  | otherwise = do
+      fromAcc <- requireAccount conn fromAccId
+      toAcc <- requireAccount conn toAccId
+      if not (sameBudgetStatus fromAcc toAcc)
+        then pure (Left TransferRequiresMatchingBudgetStatus)
+        else Right <$> withTransaction conn (insertBothLegs conn fromAccId toAccId day status amount)
+
+newtype UnknownAccount = UnknownAccount AccountId deriving stock (Show)
+instance Exception UnknownAccount
+
+requireAccount :: Connection -> AccountId -> IO Account
+requireAccount conn aid = do
+  maybeAcc <- getAccount conn aid
+  maybe (throwIO (UnknownAccount aid)) pure maybeAcc
+
+insertBothLegs
+  :: Connection -> AccountId -> AccountId -> Day -> TransactionStatus -> Cents -> IO (Transaction, Transaction)
+insertBothLegs conn fromAccId toAccId day status amount = do
+  transferId <- allocateTransferId conn
+  fromTxId <- insertTransferLeg conn transferId fromAccId day status (negateCents amount) toAccId
+  toTxId <- insertTransferLeg conn transferId toAccId day status amount fromAccId
+  pure
+    ( Transaction fromTxId fromAccId day "Transfer" status (TransferLeg transferId toAccId (negateCents amount)) Nothing
+    , Transaction toTxId toAccId day "Transfer" status (TransferLeg transferId fromAccId amount) Nothing
+    )
+
+allocateTransferId :: Connection -> IO TransferId
+allocateTransferId conn = do
+  now <- getCurrentTime
+  execute conn "INSERT INTO transfers (created_at) VALUES (?)" (Only now)
+  TransferId <$> lastInsertRowId conn
+
+insertTransferLeg
+  :: Connection -> TransferId -> AccountId -> Day -> TransactionStatus -> Cents -> AccountId -> IO TransactionId
+insertTransferLeg conn transferId accId day status amount counterpartId = do
+  execute
+    conn
+    ( "INSERT INTO transactions (account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash) \
+      \VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)"
+    )
+    (accId, day, "Transfer" :: Text, status, "transfer" :: Text, amount, transferId, counterpartId)
+  TransactionId <$> lastInsertRowId conn
+
+-- De kolomlijst wordt bewust drie keer letterlijk uitgeschreven in plaats
+-- van via een gedeelde helper samengesteld: 'Query' heeft wel een
+-- 'IsString'-instance voor losse literals, maar het samenvoegen van een
+-- los opgebouwde 'Text'-waarde daarmee is onnodig risico voor drie simpele,
+-- vaste SELECTs.
+getTransaction :: Connection -> TransactionId -> IO (Maybe Transaction)
+getTransaction conn txId' = do
+  rows <-
+    query
+      conn
+      "SELECT id, account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash \
+      \FROM transactions WHERE id = ?"
+      (Only txId')
+  case rows of
+    [row] -> Just <$> rowToTransaction conn row
+    _ -> pure Nothing
+
+listTransactionsForAccount :: Connection -> AccountId -> IO [Transaction]
+listTransactionsForAccount conn accId = do
+  rows <-
+    query
+      conn
+      "SELECT id, account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash \
+      \FROM transactions WHERE account_id = ? ORDER BY date, id"
+      (Only accId)
+  traverse (rowToTransaction conn) rows
+
+-- | Alle transacties met een datum binnen de gegeven kalendermaand. Nodig
+-- om 'Domain.Budget.categoryActivity'/'accountInflows' te kunnen voeden
+-- (de Db-laag levert rijen, de daadwerkelijke rollover-berekening blijft
+-- in Domain.Budget — zie CLAUDE.md "Architectuur").
+listTransactionsInMonth :: Connection -> YearMonth -> IO [Transaction]
+listTransactionsInMonth conn ym = do
+  rows <-
+    query
+      conn
+      "SELECT id, account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash \
+      \FROM transactions WHERE date >= ? AND date < ? ORDER BY date, id"
+      (firstDay, firstDayNextMonth)
+  traverse (rowToTransaction conn) rows
+  where
+    firstDay = fromGregorian (fromIntegral (ymYear ym)) (ymMonth ym) 1
+    nextYm = nextYearMonth ym
+    firstDayNextMonth = fromGregorian (fromIntegral (ymYear nextYm)) (ymMonth nextYm) 1
