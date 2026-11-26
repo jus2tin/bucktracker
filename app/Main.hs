@@ -1,11 +1,12 @@
 module Main (main) where
 
+import Api (application)
+import Api.Monad (AppEnv (AppEnv))
 import Config (Config (configDbPath, configPort), loadConfig)
 import Db.Pool (createPool)
+import Network.Wai.Handler.Warp (run)
 import System.IO (hSetEncoding, stderr, stdout, utf8)
 
--- | Laadt config en zet de SQLite-pool + migraties op (Fase 2). De
--- Warp-server (Fase 3, Api/) volgt nog niet — zie DECISIONS.md.
 main :: IO ()
 main = do
   -- Zonder dit crasht de app op Windows zodra er een niet-ASCII teken
@@ -15,10 +16,8 @@ main = do
   hSetEncoding stdout utf8
   hSetEncoding stderr utf8
   config <- loadConfig
-  _pool <- createPool (configDbPath config)
+  pool <- createPool (configDbPath config)
+  let env = AppEnv pool
   putStrLn ("bucktracker: database gereed op " <> configDbPath config <> " (migraties toegepast).")
-  putStrLn
-    ( "Api/-laag volgt in Fase 3 — zou anders geluisterd hebben op poort "
-        <> show (configPort config)
-        <> "."
-    )
+  putStrLn ("bucktracker: luistert op http://localhost:" <> show (configPort config))
+  run (configPort config) (application env)
