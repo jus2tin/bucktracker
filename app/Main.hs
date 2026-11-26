@@ -4,7 +4,7 @@ import Api (application)
 import Api.Monad (AppEnv (AppEnv))
 import Config (Config (configDbPath, configPort), loadConfig)
 import Db.Pool (createPool)
-import Network.Wai.Handler.Warp (run)
+import Network.Wai.Handler.Warp (defaultSettings, runSettings, setHost, setPort)
 import System.IO (hSetEncoding, stderr, stdout, utf8)
 
 main :: IO ()
@@ -20,4 +20,11 @@ main = do
   let env = AppEnv pool
   putStrLn ("bucktracker: database ready at " <> configDbPath config <> " (migrations applied).")
   putStrLn ("bucktracker: listening on http://localhost:" <> show (configPort config))
-  run (configPort config) (application env)
+  -- Warp's plain 'run' binds to every network interface (defaultSettings'
+  -- host is "*4" = 0.0.0.0), not just loopback. That silently contradicts
+  -- the no-auth assumption in CLAUDE.md/DECISIONS.md ("runs on localhost
+  -- only") — anyone on the same LAN/Wi-Fi could otherwise reach this.
+  -- Bind explicitly to loopback instead. Not exposed as an env var on
+  -- purpose: an app with no auth should not make it easy to accidentally
+  -- widen this.
+  runSettings (setHost "127.0.0.1" (setPort (configPort config) defaultSettings)) (application env)
