@@ -16,6 +16,8 @@ module Db.Pool
 import Data.Pool (Pool, defaultPoolConfig, destroyAllResources, newPool, withResource)
 import Database.SQLite.Simple (Connection, close, execute_, open)
 import Db.Migrations (runMigrations)
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath (takeDirectory)
 
 -- | Maakt de pool voor het gegeven SQLite-bestand, zet op elke nieuw
 -- geopende connectie de afgesproken pragmas (WAL, foreign_keys,
@@ -23,8 +25,16 @@ import Db.Migrations (runMigrations)
 -- teruggegeven. Maximaal 8 connecties, 60 seconden idle-timeout — ruim
 -- genoeg voor een single-user desktop-app, klein genoeg om geen
 -- "database is locked"-stormen te riskeren.
+--
+-- Maakt eerst de ouder-directory van @dbPath@ aan als die nog niet
+-- bestaat (bv. een verse @%APPDATA%\\bucktracker\\@ bij de allereerste
+-- start, of een custom submap via BUCKTRACKER_DB_PATH) — anders faalt
+-- SQLite's @open@ met @ErrorCan'tOpen@ voordat er zelfs een bestand is.
+-- @createDirectoryIfMissing True@ is idempotent en werkt ook voor
+-- @:memory:@ (@takeDirectory ":memory:" == "."@, bestaat altijd al).
 createPool :: FilePath -> IO (Pool Connection)
 createPool dbPath = do
+  createDirectoryIfMissing True (takeDirectory dbPath)
   pool <- newPool (defaultPoolConfig (openConfigured dbPath) close 60 8)
   withResource pool runMigrations
   pure pool
