@@ -155,7 +155,7 @@ accountsTable accounts txs = table_ $ do
 
 accountRow :: [Transaction] -> Account -> Html ()
 accountRow txs acc = tr_ $ do
-  td_ (toHtml (accName acc))
+  td_ (a_ [href_ ("/transactions?account=" <> accountIdText (accId acc))] (toHtml (accName acc)))
   td_ (toHtml (accountTypeToText (accType acc)))
   td_ [class_ "amount"] (toHtml (centsToEuroText (accountBalance (accId acc) txs)))
   td_ (toHtml (statusText (isArchived acc)))

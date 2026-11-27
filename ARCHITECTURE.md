@@ -364,6 +364,62 @@ ignoring the shortcut entirely while focus is already in an input/
 textarea/select or a modifier key is held; `Escape` closes whichever
 drawer is open, everywhere on the page.
 
+### Editing and deleting a transaction
+
+A transaction's row on `/transactions` has an "Edit" `<details>`
+drawer (pre-filled, reusing the same create-form renderers and the
+split editor) and a "Delete" button with `hx-confirm`; neither renders
+once the transaction is `Reconciled`. `Db.Transaction.deleteTransaction`
+and the `update*` family (`updateInflow`/`updateSpending`/
+`updateTransfer`) both go through a shared `withReplaceable`: look up
+the transaction, reject with `CannotModifyReconciledTransaction` if
+it's `Reconciled`, otherwise delete its old row(s) (both legs plus the
+shared `transfers` row, for a transfer) and — for an edit — insert the
+new ones, all in one SQL transaction. An edit is therefore delete-
+then-reinsert through the exact same raw row-insert helpers a fresh
+create uses, not a bespoke `UPDATE` that would have to re-derive every
+invariant a create already enforces (on-budget-only, distinct
+accounts, matching budget status); each `update*` repeats its matching
+`insert*`'s own validation before calling `withReplaceable`, since the
+raw helpers themselves do none. The edited transaction gets a *new*
+`TransactionId` — nothing in Bucktracker outside of one page render
+depends on an id staying stable across an edit (and SQLite's own rowid
+allocator can reuse a deleted row's id anyway, so "the old id is gone"
+isn't even a safe assumption to test for).
+
+### Month navigation, local dates, and the account filter
+
+Both `/budget` and `/transactions` show whichever month `?month=YYYY-MM`
+names, defaulting to today's *local* calendar month — `Api.Monad
+.localToday` (via `Data.Time.LocalTime.getZonedTime`), not
+`getCurrentTime`/`utctDay`, since a UTC "today" can roll over several
+hours early or late for anyone not in UTC themselves (Architect review
+S-4). `Api.Monad.resolveViewedMonth` is the one shared parser: an
+absent or unparseable `?month=` just falls back, exactly as if it had
+been omitted, through `Domain.Types.parseYearMonth`/`yearMonthToText`
+(the canonical `"YYYY-MM"` text form). Both pages' Prev/Next links are
+a plain `<ul>`, not a `<nav>` — the latter is already what `Api.Html
+.page` uses for the site-wide header, and the fragment-vs-full-page
+tests tell them apart by that element's absence.
+
+Budget's inline-assign form carries the viewed month in a hidden
+`assignMonth` field, so assigning while browsing a past or future month
+assigns into *that* month, not silently back into the current one.
+Transactions' six forms (three create, three edit) don't carry the
+viewed month/account filter the same way — a deliberate v0.1
+simplification: every mutating action there (create, edit, delete,
+clear) re-renders the *default* view (today's month, no filter)
+afterward, rather than threading two more hidden fields through every
+form. Browsing March, creating a transaction, and landing back on the
+current month is a minor rough edge, not a correctness issue.
+
+`/transactions?account=<id>` filters the register to one account (the
+Accounts page links each account's name there); the filter rides along
+on the Prev/Next links (`&account=<id>`) so navigating months while
+filtered doesn't silently drop it. The register also gained the
+missing **Account** column — every row now shows which account it
+belongs to, filtered or not.
+
 ## Where do I change X?
 
 | I want to... | Touch these files |
@@ -380,3 +436,6 @@ drawer is open, everywhere on the page.
 | Change an env var, its default, or the port | `src/Config.hs`; then update `CLAUDE.md`'s "Config" line and `README.md` |
 | Change how euros are parsed/formatted on a page | `src/Api/Money.hs` — `parseSignedEuros`/`parseNonZeroSignedEuros`/`parsePositiveEuros`/`centsToEuroText`, shared by every `Api.*` module (DECISIONS.md §12, Architect review S-2). All euro fields now go through one of these three; which one encodes that field's legal range (e.g. a reconcile statement balance or a budget assignment can be negative or zero via `parseSignedEuros`, a split line/inflow can be negative but never exactly zero via `parseNonZeroSignedEuros`, a transfer must be strictly positive via `parsePositiveEuros`) |
 | Add or remove a split line, or change how many a transaction can have | `src/Api/Transactions.hs` — `NewSpendingForm`'s `FromForm` instance (`lookupAll "lineCategoryId"`/`"lineAmount"`) collects however many `lineCategoryId`/`lineAmount` pairs the form submits; `parseSplitLines` parses them; nothing caps the count server-side. Client-side add/remove rows: `static/app.js`'s `splitEditor` Alpine component |
+| Change what deleting/editing a transaction allows or blocks | `src/Db/Transaction.hs` — `withReplaceable` (the shared guard+atomicity), `deleteTransaction`, `updateInflow`/`updateSpending`/`updateTransfer`; `src/Domain/Error.hs` (`CannotModifyReconciledTransaction`); `test/Db/TransactionSpec.hs` |
+| Change month navigation, the local-date default, or add it to a new page | `src/Api/Monad.hs` (`localToday`, `resolveViewedMonth` — shared by every page with a `?month=`); `src/Domain/Types.hs` (`yearMonthToText`/`parseYearMonth`); the page's own `monthNav` function (deliberately a `<ul>`, never a `<nav>` — see "Month navigation, local dates, and the account filter") |
+| Change the account filter on `/transactions`, or add one to another page | `src/Api/Transactions.hs` — `parseAccountFilterText`, the `QueryParam "account" Text`, `accountFilterBanner`; linked from `src/Api/Accounts.hs`'s `accountRow` |

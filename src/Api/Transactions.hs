@@ -21,21 +21,27 @@
 -- transfer's amount stays strictly positive — the direction is already
 -- chosen by which account is "from" and which is "to".
 --
--- The register always shows the *current* calendar month — there's no
--- month picker yet, consistent with there being no multi-month
--- rollover orchestrator either (see DECISIONS.md §8, H-5).
+-- The register shows whichever month @?month=YYYY-MM@ names (default:
+-- today's *local* calendar month — see 'Api.Monad.localToday', Track A
+-- Step 5, S-4), optionally filtered to one account via @?account=<id>@.
+-- A mutating action (create/edit/delete/clear) always returns to the
+-- default view (today's month, no filter) rather than threading the
+-- viewed month/filter back through every form — a deliberate v0.1
+-- simplification: creating a transaction while browsing March and
+-- landing back on the current month afterward is a minor rough edge,
+-- not a correctness issue, and avoids two more hidden fields on every
+-- one of the six forms on this page.
 module Api.Transactions
   ( TransactionsApi
   , transactionsServer
   ) where
 
-import Control.Monad.IO.Class (liftIO)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
-import Data.Time (Day, fromGregorianValid, getCurrentTime, utctDay)
+import Data.Time (Day, fromGregorianValid)
 import GHC.Generics (Generic)
 import Lucid
 import Servant
@@ -54,7 +60,7 @@ import Api.Html
   , xRef_
   , xText_
   )
-import Api.Monad (AppM, withConn)
+import Api.Monad (AppM, localToday, resolveViewedMonth, withConn)
 import Api.Money (centsToEuroText, parseNonZeroSignedEuros, parsePositiveEuros)
 import qualified Db.Account as Db
 import qualified Db.Category as Db
@@ -74,15 +80,19 @@ import Domain.Types
   , Cents
   , TransactionId (TransactionId)
   , TransactionStatus (Reconciled, Uncleared)
+  , YearMonth
   , dayToYearMonth
   , negateCents
+  , nextYearMonth
+  , prevYearMonth
   , transactionStatusToText
+  , yearMonthToText
   , zeroCents
   )
 import Web.FormUrlEncoded (Form, FromForm (fromForm), lookupAll, parseUnique)
 
 type TransactionsApi =
-  "transactions" :> Get '[HTML] (Html ())
+  "transactions" :> QueryParam "month" Text :> QueryParam "account" Text :> Get '[HTML] (Html ())
     :<|> Header "HX-Request" Text :> "transactions" :> "inflow" :> ReqBody '[FormUrlEncoded] NewInflowForm :> Post '[HTML] (Html ())
     :<|> Header "HX-Request" Text :> "transactions" :> "spending" :> ReqBody '[FormUrlEncoded] NewSpendingForm :> Post '[HTML] (Html ())
     :<|> Header "HX-Request" Text :> "transactions" :> "transfer" :> ReqBody '[FormUrlEncoded] NewTransferForm :> Post '[HTML] (Html ())
@@ -150,8 +160,20 @@ transactionsServer =
     :<|> editSpendingHandler
     :<|> editTransferHandler
 
-listTransactionsHandler :: AppM (Html ())
-listTransactionsHandler = renderFragment Nothing Nothing
+listTransactionsHandler :: Maybe Text -> Maybe Text -> AppM (Html ())
+listTransactionsHandler monthParam accountParam = do
+  ym <- resolveViewedMonth monthParam
+  let accountFilter = accountParam >>= parseAccountFilterText
+  renderFragment Nothing ym accountFilter Nothing
+
+-- | @""@ (an absent @?account=@, or the hidden "clear filter" link's
+-- empty value) means "no filter" — a bad id is treated the same way,
+-- not as an error: this only ever narrows what's already shown, so
+-- there's nothing to validate strictly against.
+parseAccountFilterText :: Text -> Maybe AccountId
+parseAccountFilterText t
+  | Text.null (Text.strip t) = Nothing
+  | otherwise = parseAccountId t
 
 -- | Parses and validates an inflow form's fields, then hands them to
 -- @go@ — shared by 'createInflowHandler' and 'editInflowHandler', which
@@ -173,7 +195,7 @@ withValidInflow hx form go = case parseAccountId (inflowAccountId form) of
 createInflowHandler :: Maybe Text -> NewInflowForm -> AppM (Html ())
 createInflowHandler hx form = withValidInflow hx form $ \aid day payee amt -> do
   _ <- withConn (\conn -> Db.insertInflow conn aid day payee defaultStatus amt Nothing)
-  renderFragment hx Nothing
+  renderDefault hx
 
 editInflowHandler :: Maybe Text -> Int64 -> NewInflowForm -> AppM (Html ())
 editInflowHandler hx rawId form = withValidInflow hx form $ \aid day payee amt -> do
@@ -181,7 +203,7 @@ editInflowHandler hx rawId form = withValidInflow hx form $ \aid day payee amt -
   case result of
     Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
     Left _ -> withError hx "Could not update transaction."
-    Right _ -> renderFragment hx Nothing
+    Right _ -> renderDefault hx
 
 -- | Parses and validates a spending (split) form's fields, then hands
 -- them to @go@ — shared by 'createSpendingHandler' and
@@ -217,7 +239,7 @@ createSpendingHandler hx form = withValidSpending hx form $ \aid day payee lines
     Left CategorizedTransactionRequiresOnBudgetAccount ->
       withError hx "Categorized transactions are not allowed on tracking accounts."
     Left _ -> withError hx "Could not create transaction."
-    Right _ -> renderFragment hx Nothing
+    Right _ -> renderDefault hx
 
 editSpendingHandler :: Maybe Text -> Int64 -> NewSpendingForm -> AppM (Html ())
 editSpendingHandler hx rawId form = withValidSpending hx form $ \aid day payee lines' -> do
@@ -227,7 +249,7 @@ editSpendingHandler hx rawId form = withValidSpending hx form $ \aid day payee l
       withError hx "Categorized transactions are not allowed on tracking accounts."
     Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
     Left _ -> withError hx "Could not update transaction."
-    Right _ -> renderFragment hx Nothing
+    Right _ -> renderDefault hx
 
 -- | Parses and validates a transfer form's fields, then hands them to
 -- @go@ — shared by 'createTransferHandler' and 'editTransferHandler'.
@@ -255,7 +277,7 @@ createTransferHandler hx form = withValidTransfer hx form $ \fromAid toAid day a
     Left TransferRequiresMatchingBudgetStatus ->
       withError hx "Cannot transfer between an on-budget and a tracking account."
     Left _ -> withError hx "Could not create transfer."
-    Right _ -> renderFragment hx Nothing
+    Right _ -> renderDefault hx
 
 editTransferHandler :: Maybe Text -> Int64 -> NewTransferForm -> AppM (Html ())
 editTransferHandler hx rawId form = withValidTransfer hx form $ \fromAid toAid day amt -> do
@@ -266,7 +288,7 @@ editTransferHandler hx rawId form = withValidTransfer hx form $ \fromAid toAid d
       withError hx "Cannot transfer between an on-budget and a tracking account."
     Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
     Left _ -> withError hx "Could not update transfer."
-    Right _ -> renderFragment hx Nothing
+    Right _ -> renderDefault hx
 
 -- | Toggles one transaction between Uncleared and Cleared from the
 -- register — the first step of reconciling (the second, account-wide
@@ -276,7 +298,7 @@ editTransferHandler hx rawId form = withValidTransfer hx form $ \fromAid toAid d
 toggleClearedHandler :: Maybe Text -> Int64 -> AppM (Html ())
 toggleClearedHandler hx rawId = do
   withConn (\conn -> Db.setTransactionCleared conn (TransactionId rawId))
-  renderFragment hx Nothing
+  renderDefault hx
 
 -- | Deletes a transaction (both legs, for a transfer) via
 -- 'Db.deleteTransaction'. Blocked server-side on an already-'Reconciled'
@@ -289,35 +311,78 @@ deleteTransactionHandler hx rawId = do
   case result of
     Left CannotModifyReconciledTransaction -> withError hx "Cannot delete a reconciled transaction."
     Left _ -> withError hx "Could not delete transaction."
-    Right () -> renderFragment hx Nothing
+    Right () -> renderDefault hx
 
 defaultStatus :: TransactionStatus
 defaultStatus = Uncleared
 
+-- | Every mutating handler's error path. Always re-renders the default
+-- view (today's month, no account filter) — see the module header for
+-- why a mutation doesn't thread the viewed month/filter back through.
 withError :: Maybe Text -> Text -> AppM (Html ())
-withError hx msg = renderFragment hx (Just msg)
+withError hx msg = do
+  today <- localToday
+  renderFragment hx (dayToYearMonth today) Nothing (Just msg)
 
--- | Every mutating handler renders back through this. A plain
--- (non-HTMX) request gets a full page back — the progressive-
+-- | Every mutating handler's success path — see 'withError'.
+renderDefault :: Maybe Text -> AppM (Html ())
+renderDefault hx = do
+  today <- localToday
+  renderFragment hx (dayToYearMonth today) Nothing Nothing
+
+-- | The one place that actually renders the register, for both a
+-- freshly-viewed @?month=@/@?account=@ (via 'listTransactionsHandler')
+-- and a mutation's default-view re-render ('withError'/'renderDefault').
+-- A plain (non-HTMX) request gets a full page back — the progressive-
 -- enhancement fallback for when HTMX didn't load — an HTMX request
 -- gets just the @#transactions-content@ fragment it's about to swap in
 -- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'.
-renderFragment :: Maybe Text -> Maybe Text -> AppM (Html ())
-renderFragment hx err = do
-  today <- liftIO getCurrentTime
-  let ym = dayToYearMonth (utctDay today)
-  transactions <- withConn (\conn -> Db.listTransactionsInMonth conn ym)
+renderFragment :: Maybe Text -> YearMonth -> Maybe AccountId -> Maybe Text -> AppM (Html ())
+renderFragment hx ym accountFilter err = do
+  today <- localToday
+  transactionsInMonth <- withConn (\conn -> Db.listTransactionsInMonth conn ym)
+  let transactions = maybe transactionsInMonth (\aid -> filter ((== aid) . txAccount) transactionsInMonth) accountFilter
   accounts <- withConn Db.listAccounts
   categories <- withConn Db.listCategories
-  pure (pageOrFragment hx "Transactions" (transactionsContent err accounts categories transactions))
+  pure
+    ( pageOrFragment
+        hx
+        "Transactions"
+        (transactionsContent err today ym accountFilter accounts categories transactions)
+    )
 
-transactionsContent :: Maybe Text -> [Account] -> [Category] -> [Transaction] -> Html ()
-transactionsContent err accounts categories transactions = div_ [id_ "transactions-content"] $ do
+transactionsContent
+  :: Maybe Text -> Day -> YearMonth -> Maybe AccountId -> [Account] -> [Category] -> [Transaction] -> Html ()
+transactionsContent err today ym accountFilter accounts categories transactions = div_ [id_ "transactions-content"] $ do
   errorBanner err
-  newInflowForm accounts
-  newSpendingForm accounts categories
-  newTransferForm accounts
+  monthNav ym accountFilter
+  accountFilterBanner accounts accountFilter
+  newInflowForm today accounts
+  newSpendingForm today accounts categories
+  newTransferForm today accounts
   transactionsTable accounts categories transactions
+
+-- | @\<- Prev | YYYY-MM | Next -\>@, each a plain link to
+-- @\/transactions?month=YYYY-MM@ (carrying the account filter along, if
+-- one is active) — no JS needed, a full page load either way. A plain
+-- @\<ul\>@, not a @\<nav\>@: see Api.Budget's identical reasoning.
+monthNav :: YearMonth -> Maybe AccountId -> Html ()
+monthNav ym accountFilter =
+  ul_ [class_ "month-nav"] $ do
+    li_ (a_ [href_ (monthLink (prevYearMonth ym))] "<- Prev")
+    li_ (toHtml (yearMonthToText ym))
+    li_ (a_ [href_ (monthLink (nextYearMonth ym))] "Next ->")
+  where
+    monthLink m = "/transactions?month=" <> yearMonthToText m <> accountQuerySuffix accountFilter
+    accountQuerySuffix Nothing = ""
+    accountQuerySuffix (Just (AccountId i)) = "&account=" <> Text.pack (show i)
+
+accountFilterBanner :: [Account] -> Maybe AccountId -> Html ()
+accountFilterBanner _ Nothing = mempty
+accountFilterBanner accounts (Just aid) =
+  p_ $ do
+    toHtml ("Showing: " <> accountNameFor accounts aid <> " ")
+    a_ [href_ "/transactions"] "[show all accounts]"
 
 activeAccounts :: [Account] -> [Account]
 activeAccounts = filter (not . isArchived)
@@ -345,8 +410,8 @@ categoryOption selected cat =
 -- @\<dialog\>@: plain, native, no JS needed for open/close, no focus-
 -- trap to get wrong — "lightweight ... drawers" was explicitly offered
 -- as the plan's simpler alternative (Track A Step 4).
-newInflowForm :: [Account] -> Html ()
-newInflowForm accounts =
+newInflowForm :: Day -> [Account] -> Html ()
+newInflowForm today accounts =
   details_ [id_ "new-inflow-details"] $ do
     summary_ "New Inflow"
     form_
@@ -358,7 +423,7 @@ newInflowForm accounts =
       ]
       $ do
         select_ [name_ "inflowAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
-        input_ [type_ "date", name_ "inflowDate"]
+        input_ [type_ "date", name_ "inflowDate", value_ (dayText today)]
         input_ [type_ "text", name_ "inflowPayee", placeholder_ "Payee"]
         input_ [type_ "text", name_ "inflowAmount", placeholder_ "0.00 (negative = opening balance correction)"]
         button_ [type_ "submit"] "Add inflow"
@@ -394,8 +459,8 @@ editInflowForm accounts tx amt =
 -- arrive (invariant 3).
 -- | Wrapped in @\<details\>@ (id @new-expense-details@, the @n@
 -- keyboard shortcut) — see 'newInflowForm'.
-newSpendingForm :: [Account] -> [Category] -> Html ()
-newSpendingForm accounts categories =
+newSpendingForm :: Day -> [Account] -> [Category] -> Html ()
+newSpendingForm today accounts categories =
   details_ [id_ "new-expense-details"] $ do
     summary_ "New Expense"
     form_
@@ -408,7 +473,7 @@ newSpendingForm accounts categories =
       ]
       $ do
         select_ [name_ "spendingAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
-        input_ [type_ "date", name_ "spendingDate"]
+        input_ [type_ "date", name_ "spendingDate", value_ (dayText today)]
         input_ [type_ "text", name_ "spendingPayee", placeholder_ "Payee"]
         input_
           [ type_ "text"
@@ -469,8 +534,8 @@ splitLineRow categories prefill =
 
 -- | Wrapped in @\<details\>@ (id @new-transfer-details@, the @t@
 -- keyboard shortcut) — see 'newInflowForm'.
-newTransferForm :: [Account] -> Html ()
-newTransferForm accounts =
+newTransferForm :: Day -> [Account] -> Html ()
+newTransferForm today accounts =
   details_ [id_ "new-transfer-details"] $ do
     summary_ "New Transfer"
     form_
@@ -483,7 +548,7 @@ newTransferForm accounts =
       $ do
         select_ [name_ "transferFromAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
         select_ [name_ "transferToAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
-        input_ [type_ "date", name_ "transferDate"]
+        input_ [type_ "date", name_ "transferDate", value_ (dayText today)]
         input_ [type_ "number", step_ "0.01", min_ "0", name_ "transferAmount", placeholder_ "0.00"]
         button_ [type_ "submit"] "Add transfer"
 
@@ -512,12 +577,14 @@ editTransferForm accounts tx counterpartAcc legAmount =
 
 transactionsTable :: [Account] -> [Category] -> [Transaction] -> Html ()
 transactionsTable accounts categories transactions = table_ $ do
-  thead_ (tr_ (mapM_ (th_ . toHtml) (["Date", "Payee", "Category", "Amount", "Status", "", "", ""] :: [Text])))
+  thead_
+    (tr_ (mapM_ (th_ . toHtml) (["Date", "Account", "Payee", "Category", "Amount", "Status", "", "", ""] :: [Text])))
   tbody_ (mapM_ (transactionRow accounts categories) transactions)
 
 transactionRow :: [Account] -> [Category] -> Transaction -> Html ()
 transactionRow accounts categories tx = tr_ $ do
   td_ (toHtml (dayText (txDate tx)))
+  td_ (toHtml (accountNameFor accounts (txAccount tx)))
   td_ (toHtml (txPayee tx))
   td_ (toHtml (categorizationText accounts categories (txCategorization tx)))
   td_ [class_ "amount"] (toHtml (centsToEuroText (transactionAmount tx)))

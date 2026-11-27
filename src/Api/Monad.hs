@@ -7,14 +7,20 @@ module Api.Monad
   , AppM
   , runAppM
   , withConn
+  , localToday
+  , resolveViewedMonth
   ) where
 
 import Control.Monad.Except (MonadError)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
 import Data.Pool (Pool)
+import Data.Text (Text)
+import Data.Time (Day)
+import Data.Time.LocalTime (getZonedTime, localDay, zonedTimeToLocalTime)
 import Database.SQLite.Simple (Connection)
 import qualified Db.Pool as Pool
+import Domain.Types (YearMonth, dayToYearMonth, parseYearMonth)
 import Servant (Handler, ServerError)
 
 data AppEnv = AppEnv
@@ -40,3 +46,20 @@ withConn :: (Connection -> IO a) -> AppM a
 withConn action = do
   pool <- asks appPool
   liftIO (Pool.withConnection pool action)
+
+-- | Today's date in the system's *local* timezone, not UTC
+-- ('getCurrentTime'/'utctDay' alone) — a user west of UTC (anywhere in
+-- the Americas, say) could otherwise see "today" roll over several
+-- hours early or late (Track A Step 5, S-4).
+localToday :: AppM Day
+localToday = liftIO (localDay . zonedTimeToLocalTime <$> getZonedTime)
+
+-- | @?month=YYYY-MM@ if present and valid, otherwise today's local
+-- month — never an error either way: an unparseable or missing
+-- @?month=@ just falls back, exactly as if it had been omitted.
+-- Shared by "Api.Budget" and "Api.Transactions", the two pages with
+-- month navigation (Track A Step 5, S-4).
+resolveViewedMonth :: Maybe Text -> AppM YearMonth
+resolveViewedMonth monthParam = case monthParam >>= parseYearMonth of
+  Just ym -> pure ym
+  Nothing -> dayToYearMonth <$> localToday
