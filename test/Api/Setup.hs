@@ -20,14 +20,17 @@ import Api (application)
 import Api.Monad (AppEnv (AppEnv))
 import Db.Pool (createPool)
 import Network.Wai (Application)
+import Paths_bucktracker (getDataDir)
 import System.Directory (getTemporaryDirectory)
+import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 
 withTestApp :: IO Application
 withTestApp = do
   dbPath <- freshTempDbPath
   pool <- createPool dbPath
-  pure (application (AppEnv pool))
+  staticDir <- (</> "static") <$> getDataDir
+  pure (application (AppEnv pool staticDir))
 
 freshTempDbPath :: IO FilePath
 freshTempDbPath = do

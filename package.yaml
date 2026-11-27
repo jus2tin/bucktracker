@@ -13,8 +13,13 @@ extra-source-files:
 # Migrations are plain, reviewable .sql files (no TemplateHaskell/
 # file-embed): they get installed via data-files and found at runtime via
 # the generated Paths_bucktracker module. See DECISIONS.md §7.
+# Static frontend assets (vendored, pinned, zero build step) use the
+# exact same mechanism. See DECISIONS.md §12 and
+# docs/phases/phase-02-hardening-and-forecasting.md, Track A Step 1.
 data-files:
 - migrations/*.sql
+- static/*.css
+- static/*.js
 
 synopsis:            Personal zero-based / envelope budget and money tracker
 category:            Finance
@@ -83,6 +88,7 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - bucktracker
+    - filepath
     - warp
 
 tests:

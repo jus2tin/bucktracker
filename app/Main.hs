@@ -5,6 +5,8 @@ import Api.Monad (AppEnv (AppEnv))
 import Config (Config (configDbPath, configPort), loadConfig)
 import Db.Pool (createPool)
 import Network.Wai.Handler.Warp (defaultSettings, runSettings, setHost, setPort)
+import Paths_bucktracker (getDataDir)
+import System.FilePath ((</>))
 import System.IO (hSetEncoding, stderr, stdout, utf8)
 
 main :: IO ()
@@ -17,7 +19,8 @@ main = do
   hSetEncoding stderr utf8
   config <- loadConfig
   pool <- createPool (configDbPath config)
-  let env = AppEnv pool
+  staticDir <- (</> "static") <$> getDataDir
+  let env = AppEnv pool staticDir
   putStrLn ("bucktracker: database ready at " <> configDbPath config <> " (migrations applied).")
   putStrLn ("bucktracker: listening on http://localhost:" <> show (configPort config))
   -- Warp's plain 'run' binds to every network interface (defaultSettings'
