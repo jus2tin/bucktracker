@@ -444,3 +444,25 @@ later.
   simpler fixed set of patterns), whether `ScheduledItem` needs its own
   soft-delete/pause state, and how far into the future `/forecast`
   defaults to projecting.
+
+## 11. Flagged for v0.1 completion (not yet fixed)
+
+- **Archiving is a one-way trip.** `archiveAccount`/`archiveCategory`/
+  `archiveCategoryGroup` only ever set `archived_at` — there's no
+  "unarchive" function anywhere in `Db.*`, and no UI control for one.
+  Combined with there being no confirmation step before archiving
+  anything (M-7 above already named this for `Api.Accounts`
+  specifically; it's equally true of `Api.Categories` and category
+  groups, which M-7 doesn't mention), one accidental click on "Archive"
+  is effectively permanent today — the only way back is a direct SQL
+  `UPDATE ... SET archived_at = NULL`.
+  - Flagged 2026-11-27 (product direction, found while reviewing the
+    Categories page): before calling v0.1 done, add (a) an
+    `hx-confirm` "Are you sure?" prompt on every archive button across
+    Accounts/Categories/category groups, and (b) a real unarchive
+    action — a new `Db.*` function clearing `archived_at`, plus the UI
+    control to trigger it — so a mistaken archive has an actual undo
+    path, not just a confirmation gate in front of the same one-way
+    door.
+  - Deliberately **not fixed in this pass** — logged so it isn't lost,
+    not yet acted on.
