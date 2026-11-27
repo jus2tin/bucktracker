@@ -34,6 +34,7 @@ import Servant.HTML.Lucid (HTML)
 
 import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment)
 import Api.Monad (AppM, withConn)
+import Api.Money (centsToEuroText, parsePositiveEuros)
 import qualified Db.Account as Db
 import qualified Db.Category as Db
 import qualified Db.Transaction as Db
@@ -49,11 +50,8 @@ import Domain.Transaction
 import Domain.Types
   ( AccountId (AccountId)
   , CategoryId (CategoryId)
-  , Cents
   , TransactionId (TransactionId)
   , TransactionStatus (Reconciled, Uncleared)
-  , centsValue
-  , cents
   , dayToYearMonth
   , negateCents
   , transactionStatusToText
@@ -118,7 +116,7 @@ createInflowHandler hx form = case parseAccountId (inflowAccountId form) of
   Nothing -> withError hx "Unknown account."
   Just aid -> case parseIsoDate (inflowDate form) of
     Nothing -> withError hx "Invalid date."
-    Just day -> case parseEuros (inflowAmount form) of
+    Just day -> case parsePositiveEuros (inflowAmount form) of
       Nothing -> withError hx "Invalid amount."
       Just amt -> do
         accounts <- withConn Db.listAccounts
@@ -165,7 +163,7 @@ createTransferHandler hx form = case parseAccountId (transferFromAccountId form)
     Nothing -> withError hx "Unknown account."
     Just toAid -> case parseIsoDate (transferDate form) of
       Nothing -> withError hx "Invalid date."
-      Just day -> case parseEuros (transferAmount form) of
+      Just day -> case parsePositiveEuros (transferAmount form) of
         Nothing -> withError hx "Invalid amount."
         Just amt -> do
           accounts <- withConn Db.listAccounts
@@ -343,19 +341,6 @@ categoryNameFor categories cid = case filter ((== cid) . catId) categories of
   (c : _) -> catName c
   []      -> "—"
 
-centsToEuroText :: Cents -> Text
-centsToEuroText amt =
-  sign <> Text.pack (show whole) <> "." <> pad2 frac
-  where
-    raw = centsValue amt
-    sign = if raw < 0 then "-" else ""
-    absValue = abs raw
-    whole = absValue `div` 100
-    frac = absValue `mod` 100
-    pad2 n =
-      let s = Text.pack (show n)
-      in if Text.length s < 2 then "0" <> s else s
-
 -- | Parses a decimal id out of an HTML @\<select\>@'s value, total and
 -- without 'Prelude.read' (CLAUDE.md "Total functions only").
 parseAccountId :: Text -> Maybe AccountId
@@ -369,7 +354,7 @@ parseCategoryId t = CategoryId <$> parseInt64 t
 parseRequiredLine :: Text -> Text -> Either Text TransactionLine
 parseRequiredLine catText amtText = case parseCategoryId catText of
   Nothing -> Left "Unknown category."
-  Just cid -> case parseEuros amtText of
+  Just cid -> case parsePositiveEuros amtText of
     Nothing -> Left "Invalid amount."
     Just amt -> Right (TransactionLine cid (negateCents amt))
 
@@ -387,24 +372,6 @@ parseInt64 :: Text -> Maybe Int64
 parseInt64 t = case TextRead.decimal t of
   Right (n, rest) | Text.null rest -> Just n
   _                                -> Nothing
-
--- | Parses a non-negative decimal euro amount (e.g. @"12.34"@ or
--- @"12"@) into whole cents, total and without 'Prelude.read'.
-parseEuros :: Text -> Maybe Cents
-parseEuros raw = case Text.splitOn "." (Text.strip raw) of
-  [wholePart] -> centsFromParts wholePart "00"
-  [wholePart, fracPart]
-    | Text.length fracPart == 1 -> centsFromParts wholePart (fracPart <> "0")
-    | Text.length fracPart == 2 -> centsFromParts wholePart fracPart
-  _ -> Nothing
-
-centsFromParts :: Text -> Text -> Maybe Cents
-centsFromParts wholePart fracPart
-  | Text.null wholePart = Nothing
-  | otherwise = do
-      whole <- parseInt64 wholePart
-      frac <- parseInt64 fracPart
-      Just (cents (whole * 100 + frac))
 
 -- | Parses an HTML @\<input type="date"\>@ value (@"YYYY-MM-DD"@),
 -- total and without 'Data.Time.Format.parseTimeM' (which can throw).

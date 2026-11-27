@@ -39,6 +39,7 @@ library
       Api.Categories
       Api.Html
       Api.Monad
+      Api.Money
       Api.Transactions
       Config
       Db.Account
@@ -128,6 +129,7 @@ test-suite bucktracker-test
       Api.AccountsSpec
       Api.BudgetSpec
       Api.CategoriesSpec
+      Api.MoneySpec
       Api.Setup
       Api.StaticSpec
       Api.TransactionsSpec

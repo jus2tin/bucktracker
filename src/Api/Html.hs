@@ -19,6 +19,8 @@ module Api.Html
   , xShow_
   , xText_
   , xOn_
+  , xRef_
+  , xModel_
   ) where
 
 import Data.Text (Text)
@@ -33,8 +35,14 @@ page title content = doctypehtml_ $ do
     title_ (toHtml title)
     link_ [rel_ "stylesheet", href_ "/static/pico.min.css"]
     script_ [defer_ "", src_ "/static/htmx.min.js"] ("" :: Text)
-    script_ [defer_ "", src_ "/static/alpine-csp.min.js"] ("" :: Text)
+    -- app.js registers Alpine.data components via an 'alpine:init'
+    -- listener — it must execute, and so register that listener,
+    -- *before* alpine-csp.min.js runs (which dispatches 'alpine:init'
+    -- and scans the DOM as soon as it loads). Deferred scripts run in
+    -- document order, so this ordering — not load-completion order —
+    -- is what guarantees that.
     script_ [defer_ "", src_ "/static/app.js"] ("" :: Text)
+    script_ [defer_ "", src_ "/static/alpine-csp.min.js"] ("" :: Text)
     style_ pageStyle
   body_ $ do
     header_ [class_ "container"] $
@@ -105,9 +113,16 @@ xShow_ = makeAttribute "x-show"
 xText_ :: Text -> Attribute
 xText_ = makeAttribute "x-text"
 
--- | @x-on:\<event\>="..."@, e.g. @xOn_ "click" "open = true"@.
+-- | @x-on:\<event\>="..."@, e.g. @xOn_ "click" "open = true"@. Modifiers
+-- go in the event name itself, e.g. @xOn_ "keydown.escape" "cancel"@.
 xOn_ :: Text -> Text -> Attribute
 xOn_ event = makeAttribute ("x-on:" <> event)
+
+xRef_ :: Text -> Attribute
+xRef_ = makeAttribute "x-ref"
+
+xModel_ :: Text -> Attribute
+xModel_ = makeAttribute "x-model"
 
 -- | Only what Pico CSS doesn't already style for us.
 pageStyle :: Text

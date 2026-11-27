@@ -25,15 +25,28 @@ import Lucid
 import Servant
 import Servant.HTML.Lucid (HTML)
 
-import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment)
+import Api.Html
+  ( errorBanner
+  , hxPost_
+  , hxSwap_
+  , hxTarget_
+  , pageOrFragment
+  , xData_
+  , xModel_
+  , xOn_
+  , xRef_
+  , xShow_
+  , xText_
+  )
 import Api.Monad (AppM, withConn)
+import Api.Money (centsToEuroText, parseSignedEuros)
 import qualified Db.Account as Db
 import qualified Db.Assignment as Db
 import qualified Db.Category as Db
 import qualified Db.Transaction as Db
 import Domain.Budget
   ( Assignment (asgMonth)
-  , CategoryMonth (cmActivity, cmAssigned, cmCategory)
+  , CategoryMonth (cmActivity, cmAssigned, cmCarriedIn, cmCategory)
   , MonthlyBudget (..)
   , available
   , rolloverMonths
@@ -44,23 +57,14 @@ import Domain.Category
   , isArchivedCategory
   )
 import Domain.Transaction (Transaction, txDate)
-import Domain.Types
-  ( Cents
-  , CategoryId (CategoryId)
-  , YearMonth
-  , centsValue
-  , cents
-  , dayToYearMonth
-  , nextYearMonth
-  , zeroCents
-  )
+import Domain.Types (Cents, CategoryId (CategoryId), YearMonth, dayToYearMonth, nextYearMonth, zeroCents)
 import Web.FormUrlEncoded (FromForm)
 
 type BudgetApi =
   "budget" :> Get '[HTML] (Html ())
     :<|> Header "HX-Request" Text :> "budget" :> "assign" :> ReqBody '[FormUrlEncoded] NewAssignmentForm :> Post '[HTML] (Html ())
 
--- | Field names must match the @name@ attributes of 'newAssignmentForm'
+-- | Field names must match the @name@ attributes of 'assignedCell'
 -- below — 'FromForm' parses by field name.
 data NewAssignmentForm = NewAssignmentForm
   { assignCategoryId :: Text
@@ -75,10 +79,17 @@ budgetServer = listBudgetHandler :<|> assignHandler
 listBudgetHandler :: AppM (Html ())
 listBudgetHandler = renderFragment Nothing Nothing
 
+-- | Assigning is signed on purpose (DECISIONS.md §12, Architect review
+-- S-2): once money has rolled over into a category from a previous
+-- month, the only way to move it back to Ready to Assign is setting
+-- this month's assigned amount *negative* (e.g. @-50.00@ against a
+-- carried-in €50) — 'Domain.Budget.available' already handles that
+-- arithmetic correctly, the old unsigned-only parser was the only
+-- thing stopping it from ever being reachable.
 assignHandler :: Maybe Text -> NewAssignmentForm -> AppM (Html ())
 assignHandler hx form = case parseCategoryId (assignCategoryId form) of
   Nothing -> withError hx "Unknown category."
-  Just cid -> case parseEuros (assignAmount form) of
+  Just cid -> case parseSignedEuros (assignAmount form) of
     Nothing -> withError hx "Invalid amount."
     Just amt -> do
       categories <- withConn Db.listCategories
@@ -146,64 +157,93 @@ budgetContent :: Maybe Text -> [CategoryGroup] -> [Category] -> [CategoryMonth] 
 budgetContent err groups categories categoryMonths rta = div_ [id_ "budget-content"] $ do
   errorBanner err
   readyToAssignBanner rta
-  newAssignmentForm categories
   budgetTable groups categories categoryMonths
 
 readyToAssignBanner :: Cents -> Html ()
 readyToAssignBanner rta = p_ (toHtml ("Ready to Assign: " <> centsToEuroText rta))
 
-newAssignmentForm :: [Category] -> Html ()
-newAssignmentForm categories =
-  form_
-    [method_ "post", action_ "/budget/assign", hxPost_ "/budget/assign", hxTarget_ "#budget-content", hxSwap_ "outerHTML"]
-    $ do
-      select_ [name_ "assignCategoryId"] (mapM_ categoryOption (activeCategories categories))
-      input_ [type_ "number", step_ "0.01", min_ "0", name_ "assignAmount", placeholder_ "0.00"]
-      button_ [type_ "submit"] "Assign"
-
-activeCategories :: [Category] -> [Category]
-activeCategories = filter (not . isArchivedCategory)
-
-categoryOption :: Category -> Html ()
-categoryOption cat = option_ [value_ (categoryIdText (catId cat))] (toHtml (catName cat))
-
+-- | Categories are grouped visually under their 'CategoryGroup'
+-- heading instead of repeating the group name as a flat table column.
+-- An archived category whose 'cmCarriedIn'/'cmAssigned'/'cmActivity'
+-- (and therefore 'available') are all zero is hidden entirely — it's
+-- not carrying any money and has nothing left to clean up — but it
+-- stays in @categoryMonths@ (built from *every* category, archived or
+-- not) so invariant 1 keeps holding over the full ledger regardless of
+-- what's currently on screen.
 budgetTable :: [CategoryGroup] -> [Category] -> [CategoryMonth] -> Html ()
 budgetTable groups categories categoryMonths = table_ $ do
-  thead_ (tr_ (mapM_ (th_ . toHtml) (["Category", "Group", "Assigned", "Activity", "Available"] :: [Text])))
-  tbody_ (mapM_ (categoryMonthRow groups categories) categoryMonths)
+  thead_ (tr_ (mapM_ (th_ . toHtml) (["Category", "Carried In", "Assigned", "Activity", "Available"] :: [Text])))
+  tbody_ (mapM_ groupSection visibleGroups)
+  where
+    visibleGroups =
+      [ (g, visibleRows)
+      | g <- groups
+      , let visibleRows = filter (isVisible categories) (rowsForGroup g)
+      , not (null visibleRows)
+      ]
+    rowsForGroup g = [cm | cm <- categoryMonths, groupIdOf (cmCategory cm) == Just (cgId g)]
+    groupIdOf cid = catGroupId <$> find ((== cid) . catId) categories
 
-categoryMonthRow :: [CategoryGroup] -> [Category] -> CategoryMonth -> Html ()
-categoryMonthRow groups categories cm = tr_ $ do
+    groupSection :: (CategoryGroup, [CategoryMonth]) -> Html ()
+    groupSection (g, rows) = do
+      tr_ (th_ [colspan_ "5"] (toHtml (cgName g)))
+      mapM_ (categoryMonthRow categories) rows
+
+isVisible :: [Category] -> CategoryMonth -> Bool
+isVisible categories cm = not (archived && allZero)
+  where
+    archived = maybe False isArchivedCategory (find ((== cmCategory cm) . catId) categories)
+    allZero = cmCarriedIn cm == zeroCents && cmAssigned cm == zeroCents && cmActivity cm == zeroCents
+
+categoryMonthRow :: [Category] -> CategoryMonth -> Html ()
+categoryMonthRow categories cm = tr_ $ do
   td_ (toHtml (categoryNameFor categories (cmCategory cm)))
-  td_ (toHtml (groupNameFor groups categories (cmCategory cm)))
-  td_ [class_ "amount"] (toHtml (centsToEuroText (cmAssigned cm)))
+  td_ [class_ "amount"] (toHtml (centsToEuroText (cmCarriedIn cm)))
+  td_ [class_ "amount"] (assignedCell cm)
   td_ [class_ "amount"] (toHtml (centsToEuroText (cmActivity cm)))
   td_ [class_ "amount"] (toHtml (centsToEuroText (available cm)))
+
+-- | Inline click-to-edit "Assigned" amount (replacing the old detached
+-- top-of-page assignment form): the Alpine @inlineAssign@ component
+-- (@static/app.js@) shows the current value as plain text, reveals an
+-- editable input on click, submits on Enter or on a real change
+-- (blurring after actually typing something different), and Escape
+-- restores the display value without a server round-trip. Without any
+-- JS, this is still a perfectly ordinary @\<form\>@ — HTMX's
+-- @hx-post@/@hx-target@/@hx-swap@ attributes stay on the form either
+-- way, and implicit submission (Enter in the one text input) still
+-- works.
+assignedCell :: CategoryMonth -> Html ()
+assignedCell cm =
+  form_
+    [ method_ "post"
+    , action_ "/budget/assign"
+    , hxPost_ "/budget/assign"
+    , hxTarget_ "#budget-content"
+    , hxSwap_ "outerHTML"
+    , xData_ ("inlineAssign('" <> displayText <> "')")
+    , xRef_ "form"
+    ]
+    $ do
+      input_ [type_ "hidden", name_ "assignCategoryId", value_ (categoryIdText (cmCategory cm))]
+      span_ [xShow_ "notEditing", xOn_ "click" "startEdit()", xText_ "displayValue"] (toHtml displayText)
+      input_
+        [ xShow_ "editing"
+        , xRef_ "input"
+        , type_ "text"
+        , name_ "assignAmount"
+        , xModel_ "value"
+        , xOn_ "keydown.enter" "submitEdit()"
+        , xOn_ "keydown.escape" "cancelEdit()"
+        , xOn_ "change" "submitEdit()"
+        ]
+  where
+    displayText = centsToEuroText (cmAssigned cm)
 
 categoryNameFor :: [Category] -> CategoryId -> Text
 categoryNameFor categories cid = case filter ((== cid) . catId) categories of
   (c : _) -> catName c
   []      -> "—"
-
-groupNameFor :: [CategoryGroup] -> [Category] -> CategoryId -> Text
-groupNameFor groups categories cid = case filter ((== cid) . catId) categories of
-  (c : _) -> case filter ((== catGroupId c) . cgId) groups of
-    (g : _) -> cgName g
-    []      -> "—"
-  [] -> "—"
-
-centsToEuroText :: Cents -> Text
-centsToEuroText amt =
-  sign <> Text.pack (show whole) <> "." <> pad2 frac
-  where
-    raw = centsValue amt
-    sign = if raw < 0 then "-" else ""
-    absValue = abs raw
-    whole = absValue `div` 100
-    frac = absValue `mod` 100
-    pad2 n =
-      let s = Text.pack (show n)
-      in if Text.length s < 2 then "0" <> s else s
 
 categoryIdText :: CategoryId -> Text
 categoryIdText (CategoryId i) = Text.pack (show i)
@@ -217,21 +257,3 @@ parseInt64 :: Text -> Maybe Int64
 parseInt64 t = case TextRead.decimal t of
   Right (n, rest) | Text.null rest -> Just n
   _                                -> Nothing
-
--- | Parses a non-negative decimal euro amount (e.g. @"12.34"@ or
--- @"12"@) into whole cents, total and without 'Prelude.read'.
-parseEuros :: Text -> Maybe Cents
-parseEuros raw = case Text.splitOn "." (Text.strip raw) of
-  [wholePart] -> centsFromParts wholePart "00"
-  [wholePart, fracPart]
-    | Text.length fracPart == 1 -> centsFromParts wholePart (fracPart <> "0")
-    | Text.length fracPart == 2 -> centsFromParts wholePart fracPart
-  _ -> Nothing
-
-centsFromParts :: Text -> Text -> Maybe Cents
-centsFromParts wholePart fracPart
-  | Text.null wholePart = Nothing
-  | otherwise = do
-      whole <- parseInt64 wholePart
-      frac <- parseInt64 fracPart
-      Just (cents (whole * 100 + frac))
