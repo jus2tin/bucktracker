@@ -50,6 +50,21 @@ spec = do
           forAll (genDayIn ym) $ \day ->
             dayToYearMonth day === ym
 
+  describe "yearMonthToText / parseYearMonth" $ do
+    it "round-trips through every YearMonth Domain.Gen produces" $
+      property $ \ym -> parseYearMonth (yearMonthToText ym) == Just ym
+
+    it "formats as YYYY-MM" $
+      case mkYearMonth 2026 3 of
+        Right ym -> yearMonthToText ym `shouldBe` "2026-03"
+        Left _   -> expectationFailure "mkYearMonth 2026 3 should succeed"
+
+    it "rejects garbage" $
+      parseYearMonth "not-a-month" `shouldBe` Nothing
+
+    it "rejects a month outside [1,12]" $
+      parseYearMonth "2026-13" `shouldBe` Nothing
+
   describe "toggleCleared" $ do
     it "is its own inverse" $
       property $ \s -> toggleCleared (toggleCleared s) == s

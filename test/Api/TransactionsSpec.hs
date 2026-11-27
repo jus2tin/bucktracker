@@ -9,10 +9,10 @@ import Network.Wai.Test (SResponse (simpleBody))
 import Test.Hspec
 import Test.Hspec.Wai
 
--- | The register only ever shows the current calendar month (no month
--- picker yet, see Api.Transactions) — tests therefore post transactions
--- dated today rather than a fixed date, so they keep passing regardless
--- of when they're run.
+-- | A mutation (create/edit/delete/clear) always re-renders the
+-- default view — today's month, no account filter (see Api.Transactions
+-- module header) — so posting a transaction dated today keeps these
+-- tests passing regardless of which real month they happen to run in.
 today :: IO String
 today = showGregorian . utctDay <$> getCurrentTime
 
@@ -26,6 +26,58 @@ spec = with withTestApp $ do
       response <- get "/transactions"
       liftIO (bodyContains "/static/pico.min.css" response `shouldBe` True)
       liftIO (bodyContainsCI "<!doctype html" response `shouldBe` True)
+
+  describe "month navigation" $ do
+    it "shows the viewed month and links to the previous/next ones" $ do
+      response <- get "/transactions?month=2026-06"
+      liftIO (bodyContains "2026-06" response `shouldBe` True)
+      liftIO (bodyContains "/transactions?month=2026-05" response `shouldBe` True)
+      liftIO (bodyContains "/transactions?month=2026-07" response `shouldBe` True)
+
+    it "only shows transactions dated within the viewed month" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", "2026-06-15"), ("inflowPayee", "June Salary"), ("inflowAmount", "100.00")]
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", "2026-07-01"), ("inflowPayee", "July Salary"), ("inflowAmount", "200.00")]
+      juneView <- get "/transactions?month=2026-06"
+      liftIO (bodyContains "June Salary" juneView `shouldBe` True)
+      liftIO (bodyContains "July Salary" juneView `shouldBe` False)
+
+  describe "account filtering" $
+    it "?account=<id> only shows that account's transactions, and the Accounts page links to it" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Savings"), ("accountType", "savings")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Checking Salary"), ("inflowAmount", "100.00")]
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "2"), ("inflowDate", day), ("inflowPayee", "Savings Interest"), ("inflowAmount", "5.00")]
+      filtered <- get "/transactions?account=1"
+      liftIO (bodyContains "Checking Salary" filtered `shouldBe` True)
+      liftIO (bodyContains "Savings Interest" filtered `shouldBe` False)
+      liftIO (bodyContains "[show all accounts]" filtered `shouldBe` True)
+
+      accountsPage <- get "/accounts"
+      liftIO (bodyContains "/transactions?account=1" accountsPage `shouldBe` True)
+
+  describe "Account column" $
+    it "shows which account each transaction belongs to" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      liftIO (bodyContains "Checking" response `shouldBe` True)
 
   describe "fragment vs. full page (S-1 fix)" $ do
     it "a plain (non-HTMX) POST gets a full page back, not a bare fragment (this used to always nest a full page inside the swap target)" $ do
@@ -245,6 +297,84 @@ spec = with withTestApp $ do
 
       afterSecondToggle <- postHtmlForm "/transactions/1/clear" []
       liftIO (bodyContains "uncleared" afterSecondToggle `shouldBe` True)
+
+  describe "POST /transactions/:id/delete" $ do
+    it "removes the transaction from the register" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      response <- postHtmlForm "/transactions/1/delete" []
+      liftIO (bodyContains "Salary" response `shouldBe` False)
+
+    it "is blocked on an already-Reconciled transaction, with an error message" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      _ <- postHtmlForm "/transactions/1/clear" []
+      _ <- postHtmlForm "/accounts/1/reconcile" [("statementBalance", "100.00")]
+      response <- postHtmlForm "/transactions/1/delete" []
+      liftIO (bodyContains "Cannot delete a reconciled transaction" response `shouldBe` True)
+      liftIO (bodyContains "Salary" response `shouldBe` True)
+
+  describe "POST /transactions/:id/edit-inflow" $
+    it "updates the payee and amount shown in the register" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Corrected Salary"), ("inflowAmount", "150.00")]
+      liftIO (bodyContains "Corrected Salary" response `shouldBe` True)
+      liftIO (bodyContains "150.00" response `shouldBe` True)
+      liftIO (bodyContains "100.00" response `shouldBe` False)
+
+  describe "POST /transactions/:id/edit-spending" $
+    it "updates the split lines shown in the register" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Household"), ("groupId", "1")]
+      day <- liftIO today
+      _ <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "40.00")
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingDate", day)
+          , ("spendingPayee", "Corrected")
+          , ("lineCategoryId", "2")
+          , ("lineAmount", "25.00")
+          ]
+      liftIO (bodyContains "Household" response `shouldBe` True)
+      liftIO (bodyContains "-25.00" response `shouldBe` True)
+      liftIO (bodyContains "-40.00" response `shouldBe` False)
+
+  describe "POST /transactions/:id/edit-transfer" $
+    it "updates the accounts and amount of both legs" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Savings"), ("accountType", "savings")]
+      _ <- postHtmlForm "/accounts" [("name", "Cash"), ("accountType", "cash")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "3"), ("transferDate", day), ("transferAmount", "75.00")]
+      liftIO (bodyContains "Transfer: Cash" response `shouldBe` True)
+      liftIO (bodyContains "75.00" response `shouldBe` True)
 
 -- | A spending form post with a single split line.
 singleLineSpending :: String -> String -> String -> String -> [(String, String)]

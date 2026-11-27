@@ -21,6 +21,8 @@ module Domain.Types
   , dayToYearMonth
   , nextYearMonth
   , prevYearMonth
+  , yearMonthToText
+  , parseYearMonth
 
     -- * IDs
   , AccountId (..)
@@ -46,6 +48,8 @@ import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Read as TextRead
 import Data.Time (Day, toGregorian)
 import Domain.Error (DomainError (..))
 
@@ -122,6 +126,32 @@ nextYearMonth (YearMonth y m)  = YearMonth y (m + 1)
 prevYearMonth :: YearMonth -> YearMonth
 prevYearMonth (YearMonth y 1) = YearMonth (y - 1) 12
 prevYearMonth (YearMonth y m) = YearMonth y (m - 1)
+
+-- | @"YYYY-MM"@ — the one canonical text form, used both for the
+-- @?month=@ query parameter and for displaying the currently viewed
+-- month ("\<- Prev | YYYY-MM | Next -\>").
+yearMonthToText :: YearMonth -> Text
+yearMonthToText (YearMonth y m) = pad4 y <> "-" <> pad2 m
+  where
+    pad4 n = let s = show n in Text.pack (replicate (max 0 (4 - length s)) '0' ++ s)
+    pad2 n = let s = show n in Text.pack (replicate (max 0 (2 - length s)) '0' ++ s)
+
+-- | The inverse of 'yearMonthToText', total and without
+-- 'Prelude.read'. Rejects an out-of-range month the same way
+-- 'mkYearMonth' does (just as 'Maybe', not 'Either' — a bad
+-- @?month=@ is handled the same as a missing one, see
+-- "Api.Budget"\/"Api.Transactions").
+parseYearMonth :: Text -> Maybe YearMonth
+parseYearMonth t = case Text.splitOn "-" t of
+  [yText, mText] -> do
+    y <- parseDecimal yText
+    m <- parseDecimal mText
+    either (const Nothing) Just (mkYearMonth y m)
+  _ -> Nothing
+  where
+    parseDecimal s = case TextRead.decimal s of
+      Right (n, rest) | Text.null rest -> Just n
+      _                                -> Nothing
 
 newtype AccountId = AccountId Int64
   deriving stock (Eq, Ord, Show)
