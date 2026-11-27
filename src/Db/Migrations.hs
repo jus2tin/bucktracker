@@ -7,13 +7,17 @@
 -- the checkout then) and after a real install, with no TemplateHaskell.
 module Db.Migrations
   ( runMigrations
+  , applyMigration
+  , InvalidMigrationEncoding (..)
   ) where
 
+import Control.Exception (Exception, throwIO)
 import Control.Monad (forM_, unless)
+import qualified Data.ByteString as BS
 import Data.List (sort)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import qualified Data.Text.IO as TextIO
+import Data.Text.Encoding (decodeUtf8')
 import Data.Time (getCurrentTime)
 import Database.SQLite.Simple
   ( Connection
@@ -64,13 +68,29 @@ appliedMigrations conn = do
   rows <- query_ conn "SELECT filename FROM schema_migrations" :: IO [Only Text.Text]
   pure (Set.fromList [Text.unpack fileName | Only fileName <- rows])
 
+-- | Thrown if a migration file isn't valid UTF-8, instead of silently
+-- mis-decoding it using whatever the system locale happens to be (e.g.
+-- CP850 on Windows) — DECISIONS.md §8, H-4. Not a silent, wrong default
+-- (that could corrupt a future migration with real non-ASCII content);
+-- a plain 'error' would in turn break the total-functions rule. This is
+-- the IO equivalent: an explicit, typed, catchable exception.
+newtype InvalidMigrationEncoding = InvalidMigrationEncoding FilePath
+  deriving stock (Show)
+instance Exception InvalidMigrationEncoding
+
 -- | Runs the whole file (which can contain multiple @;@-separated
 -- statements) via direct-sqlite's 'Raw.exec' — sqlite-simple's own
 -- 'execute_' only prepares one statement and would silently ignore the
 -- rest of the file.
+--
+-- Reads the file as raw bytes and decodes them as UTF-8 explicitly
+-- ('decodeUtf8''), rather than 'Data.Text.IO.readFile' (which decodes
+-- using the system locale encoding — wrong, and not even consistent
+-- across machines).
 applyMigration :: Connection -> FilePath -> FilePath -> IO ()
 applyMigration conn migrationsDir fileName = withTransaction conn $ do
-  sql <- TextIO.readFile (migrationsDir </> fileName)
+  bytes <- BS.readFile (migrationsDir </> fileName)
+  sql <- either (const (throwIO (InvalidMigrationEncoding fileName))) pure (decodeUtf8' bytes)
   Raw.exec (connectionHandle conn) sql
   now <- getCurrentTime
   execute

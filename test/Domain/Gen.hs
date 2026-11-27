@@ -13,14 +13,16 @@ module Domain.Gen
   , genCategory
   , World (..)
   , genWorld
+  , MultiMonthWorld (..)
+  , genMultiMonthWorld
   ) where
 
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Text as Text
 import Data.Time (Day, fromGregorian)
-import Domain.Account (Account (..), mkAccount)
+import Domain.Account (Account, accId, mkAccount)
 import Domain.Budget (Assignment (..), CategoryMonth (..))
-import Domain.Category (Category (..), mkCategory)
+import Domain.Category (Category, catId, mkCategory)
 import Domain.Transaction
   ( Categorization (..)
   , Transaction (..)
@@ -231,3 +233,69 @@ genWorld = do
     , wAssignments = assignments
     , wTransactions = numberedTxs
     }
+
+-- * A ledger spanning several consecutive months
+
+-- | Like 'World', but spanning several *consecutive* months with the
+-- same accounts/categories throughout — needed to test the multi-month
+-- rollover orchestrator ('Domain.Budget.rolloverMonths', DECISIONS.md
+-- §8 H-5), which folds carry/Ready-to-Assign from one month into the
+-- next.
+data MultiMonthWorld = MultiMonthWorld
+  { mmwAccounts     :: [Account]
+  , mmwCategories   :: [Category]
+  , mmwMonths       :: [YearMonth] -- ^ non-empty, consecutive, ascending
+  , mmwAssignments  :: [Assignment]
+  , mmwTransactions :: [Transaction]
+  } deriving stock (Show)
+
+genMultiMonthWorld :: Gen MultiMonthWorld
+genMultiMonthWorld = do
+  startMonth <- genYearMonth
+  nMonths <- choose (2, 4)
+  let months = take nMonths (iterate nextYearMonth startMonth)
+
+  nOnBudget <- choose (1, 3)
+  nTracking <- choose (0, 2)
+  onBudgetTypes <- vectorOf nOnBudget (elements [Checking, Savings, Cash])
+  onBudgetAccs <- sequence (zipWith genAccount [1 ..] onBudgetTypes)
+  trackingAccs <- traverse (`genAccount` Tracking) [nOnBudget + 1 .. nOnBudget + nTracking]
+  let accounts = onBudgetAccs ++ trackingAccs
+
+  nCategories <- choose (1, 4)
+  let groupId = CategoryGroupId 1
+  categories <- traverse (`genCategory` groupId) [1 .. nCategories]
+
+  perMonth <- traverse (genMonthActivity accounts onBudgetAccs categories) months
+  let rawTxs = concatMap snd perMonth
+      numberedTxs = zipWith (\i tx -> tx { txId = TransactionId i }) [1 ..] rawTxs
+
+  pure MultiMonthWorld
+    { mmwAccounts = accounts
+    , mmwCategories = categories
+    , mmwMonths = months
+    , mmwAssignments = concatMap fst perMonth
+    , mmwTransactions = numberedTxs
+    }
+
+-- | One month's worth of assignments/transactions for 'genMultiMonthWorld'
+-- — the same per-month generation 'genWorld' does, factored out so it
+-- can run once per month instead of just once.
+genMonthActivity :: [Account] -> [Account] -> [Category] -> YearMonth -> Gen ([Assignment], [Transaction])
+genMonthActivity accounts onBudgetAccs categories month = do
+  assignments <- traverse (genAssignmentFor month) categories
+
+  nCategorized <- choose (0, 3)
+  categorizedTxs <- vectorOf nCategorized (genCategorizedTx month onBudgetAccs categories)
+
+  nInflows <- choose (0, 3)
+  inflowTxs <- vectorOf nInflows (genInflowTx month accounts)
+
+  transferTxs <-
+    if length onBudgetAccs >= 2
+      then do
+        nTransfers <- choose (0, 2)
+        concat <$> vectorOf nTransfers (genTransferTxs month onBudgetAccs)
+      else pure []
+
+  pure (assignments, categorizedTxs ++ inflowTxs ++ transferTxs)

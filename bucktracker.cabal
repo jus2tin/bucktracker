@@ -31,9 +31,11 @@ library
   exposed-modules:
       Api
       Api.Accounts
+      Api.Budget
       Api.Categories
       Api.Html
       Api.Monad
+      Api.Transactions
       Config
       Db.Account
       Db.Assignment
@@ -119,8 +121,10 @@ test-suite bucktracker-test
   main-is: Spec.hs
   other-modules:
       Api.AccountsSpec
+      Api.BudgetSpec
       Api.CategoriesSpec
       Api.Setup
+      Api.TransactionsSpec
       Db.AccountSpec
       Db.AssignmentSpec
       Db.BackupSpec

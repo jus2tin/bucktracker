@@ -9,14 +9,18 @@ module Domain.Budget
   , buildCategoryMonth
   , accountInflows
   , accountBalance
+  , clearedBalance
   , onBudgetBalanceTotal
   , assignedTotal
   , readyToAssign
   , budgetBalancesAccounts
+  , MonthlyBudget (..)
+  , rolloverMonths
   ) where
 
+import Data.List (find)
 import Data.List.NonEmpty (toList)
-import Domain.Account (Account (..), isOnBudget)
+import Domain.Account (Account, accId, isOnBudget)
 import Domain.Transaction
   ( Categorization (..)
   , Transaction (..)
@@ -27,6 +31,7 @@ import Domain.Types
   ( AccountId
   , Cents
   , CategoryId
+  , TransactionStatus (Uncleared)
   , YearMonth
   , dayToYearMonth
   , negateCents
@@ -137,6 +142,20 @@ accountBalance :: AccountId -> [Transaction] -> Cents
 accountBalance aid txs = mconcat
   [ transactionAmount tx | tx <- txs, txAccount tx == aid ]
 
+-- | The balance reconciliation checks against a bank statement: only
+-- transactions the bank has already shown ('Cleared' or 'Reconciled'),
+-- never 'Uncleared' ones still in flight. Reconciliation itself stays a
+-- pure comparison done by the caller
+-- (@clearedBalance aid txs == bankStatementBalance@) rather than a
+-- separate domain type — see DECISIONS.md §3, "Status & payees".
+clearedBalance :: AccountId -> [Transaction] -> Cents
+clearedBalance aid txs = mconcat
+  [ transactionAmount tx
+  | tx <- txs
+  , txAccount tx == aid
+  , txStatus tx /= Uncleared
+  ]
+
 -- | Sum of the balances of all on-budget accounts — the left-hand side
 -- of invariant 1.
 onBudgetBalanceTotal :: [Account] -> [Transaction] -> Cents
@@ -167,3 +186,53 @@ budgetBalancesAccounts
   :: [Account] -> [CategoryMonth] -> Cents -> [Transaction] -> Bool
 budgetBalancesAccounts accounts categoryMonths rta txs =
   onBudgetBalanceTotal accounts txs == mconcat (map available categoryMonths) <> rta
+
+-- | One month's rollover-folded budget state: every tracked category's
+-- 'CategoryMonth' (after applying the carry it actually received from
+-- the previous month), plus Ready to Assign at the end of that month
+-- (before *this* month's own rollover is applied — that adjustment only
+-- lands on the carry-in of the month after).
+data MonthlyBudget = MonthlyBudget
+  { mbMonth          :: YearMonth
+  , mbCategoryMonths :: [CategoryMonth]
+  , mbReadyToAssign  :: Cents
+  } deriving stock (Eq, Show)
+
+-- | Folds the YNAB month rollover (DECISIONS.md §3, "Categories &
+-- months") across a whole sequence of months, for every tracked
+-- category: each month's per-category carry ('nextCarriedIn') and
+-- Ready to Assign shortfall ('rolloverRtaAdjustment') feed into the
+-- next month's carry-in, instead of every month starting fresh at
+-- 'zeroCents' — closing the gap named in DECISIONS.md §8, H-5
+-- (previously, 'budgetBalancesAccounts' was only ever exercised
+-- single-month).
+--
+-- @months@ must already be in ascending chronological order — this
+-- doesn't re-sort or deduplicate it, it just folds left to right, one
+-- rollover per step. The very first month starts fresh: every
+-- category's carry and the Ready to Assign carry-in are both
+-- 'zeroCents', since there's no "month 0" to carry in from. @txs@ and
+-- @assignments@ can safely span more than just @months@ (each step
+-- filters to its own month internally, via 'buildCategoryMonth'/
+-- 'readyToAssign').
+rolloverMonths
+  :: [Account] -> [CategoryId] -> [YearMonth] -> [Assignment] -> [Transaction] -> [MonthlyBudget]
+rolloverMonths accounts categoryIds months assignments txs = reverse (foldl' step [] months)
+  where
+    step [] month = [buildMonth month (const zeroCents) zeroCents]
+    step history@(prevMonth : _) month =
+      buildMonth month (carriedInFrom prevMonth) (rtaCarriedInFrom prevMonth) : history
+
+    carriedInFrom prevMonth cid =
+      maybe zeroCents nextCarriedIn (find ((== cid) . cmCategory) (mbCategoryMonths prevMonth))
+
+    rtaCarriedInFrom prevMonth =
+      mbReadyToAssign prevMonth
+        <> mconcat (map (rolloverRtaAdjustment . rolloverCategoryMonth) (mbCategoryMonths prevMonth))
+
+    buildMonth month carriedInOf rtaCarriedIn = MonthlyBudget
+      { mbMonth = month
+      , mbCategoryMonths =
+          [ buildCategoryMonth accounts cid month (carriedInOf cid) assignments txs | cid <- categoryIds ]
+      , mbReadyToAssign = readyToAssign rtaCarriedIn accounts month assignments txs
+      }

@@ -19,13 +19,13 @@ import Database.SQLite.Simple
   , query_
   )
 import Db.Field ()
-import Domain.Account (Account (..))
+import Domain.Account (Account, unsafeReconstructAccount)
 import Domain.Error (DomainError)
 import Domain.Types (AccountId (..), AccountType)
 import Domain.Validation (nonEmptyName)
 
 instance FromRow Account where
-  fromRow = Account <$> field <*> field <*> field <*> field
+  fromRow = unsafeReconstructAccount <$> field <*> field <*> field <*> field
 
 -- | Validates the name and, if it's valid, inserts a new account. The
 -- real ID comes from SQLite (@rowid@), so validation happens before the
@@ -40,7 +40,7 @@ insertAccount conn name ty = case nonEmptyName "account" name of
       "INSERT INTO accounts (name, type, archived_at) VALUES (?, ?, NULL)"
       (validName, ty)
     rowId <- lastInsertRowId conn
-    pure (Right (Account (AccountId rowId) validName ty Nothing))
+    pure (Right (unsafeReconstructAccount (AccountId rowId) validName ty Nothing))
 
 getAccount :: Connection -> AccountId -> IO (Maybe Account)
 getAccount conn aid = do

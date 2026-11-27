@@ -1,9 +1,10 @@
 module Db.Assignment
   ( setAssignment
   , listAssignmentsForMonth
+  , listAllAssignments
   ) where
 
-import Database.SQLite.Simple (Connection, FromRow (..), execute, field, query)
+import Database.SQLite.Simple (Connection, FromRow (..), execute, field, query, query_)
 import Db.Field (yearMonthField)
 import Domain.Budget (Assignment (Assignment))
 import Domain.Types (CategoryId, Cents, YearMonth, ymMonth, ymYear)
@@ -29,3 +30,11 @@ listAssignmentsForMonth conn ym =
     conn
     "SELECT category_id, year, month, amount FROM assignments WHERE year = ? AND month = ?"
     (ymYear ym, ymMonth ym)
+
+-- | Every assignment ever made, across all months — unlike
+-- 'listAssignmentsForMonth', deliberately not restricted to one month.
+-- Needed to fold the multi-month rollover
+-- ('Domain.Budget.rolloverMonths', DECISIONS.md §8 H-5).
+listAllAssignments :: Connection -> IO [Assignment]
+listAllAssignments conn =
+  query_ conn "SELECT category_id, year, month, amount FROM assignments"

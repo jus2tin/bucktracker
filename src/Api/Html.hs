@@ -27,9 +27,13 @@ page title content = doctypehtml_ $ do
     style_ pageStyle
   body_ $ do
     nav_ $ do
+      a_ [href_ "/budget"] "Budget"
+      " · "
       a_ [href_ "/accounts"] "Accounts"
       " · "
       a_ [href_ "/categories"] "Categories"
+      " · "
+      a_ [href_ "/transactions"] "Transactions"
     content
 
 errorBanner :: Maybe Text -> Html ()
