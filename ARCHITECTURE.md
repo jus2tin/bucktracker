@@ -86,7 +86,7 @@ Transactions page fills in the spending form and clicks submit.
 3. **The handler does HTTP-shaped validation.**
    `createSpendingHandler` turns the form's `Text` fields into real
    types: an `AccountId`, a `CategoryId`, a `Day`, a `Cents` amount —
-   using small total parsers (`parseAccountId`, `parseEuros`,
+   using small total parsers (`parseAccountId`, `Api.Money.parsePositiveEuros`,
    `parseIsoDate`; never `Prelude.read`, which can crash on bad input).
    It also checks the account and category actually exist. Anything
    wrong here (unknown account, "not a number" in the amount field)
@@ -239,6 +239,20 @@ month by month, so the Budget page's numbers are correct no matter how
 long the ledger's history is, not just in the first month anyone ever
 used the app.
 
+**Moving money back out of a category.** Groceries' carried-in €50
+isn't stuck there — assigning it a **negative** amount (`-€50.00`, via
+`Api.Money.parseSignedEuros`) sends that €50 back to Ready to Assign:
+`available = €50 (carried in) + (-€50) (assigned) + €0 = €0`, and
+`readyToAssign`'s `negateCents (assignedTotal month assignments)` term
+flips the sign, adding the €50 back. The `/budget` page's "Assigned"
+cell is editable inline (click it, type, Enter or Escape) via an
+Alpine component (`static/app.js`'s `inlineAssign`, registered through
+`Alpine.data` — the vendored build is CSP-restricted, so there's no
+inline `x-data="{ ... }"` object literal and every `x-on` handler calls
+a named method with `()`, e.g. `x-on:click="startEdit()"`, never a
+bare reference); without JS, it's still an ordinary `<form>` whose
+single text input submits on Enter.
+
 ### Split transactions
 
 A single receipt can touch more than one category — a supermarket run
@@ -318,4 +332,4 @@ yourself.
 | Add a new kind of domain error | `src/Domain/Error.hs` (`DomainError`); whichever `Domain`/`Db` function should raise it; the `Api` handler's `case result of Left ... -> ...` that turns it into an on-page message |
 | Change the SQLite pragmas, pool size, or backup behavior | `src/Db/Pool.hs` (pragmas, pool size); `src/Db/Backup.hs` (the online backup) |
 | Change an env var, its default, or the port | `src/Config.hs`; then update `CLAUDE.md`'s "Config" line and `README.md` |
-| Change how euros are parsed/formatted on a page | Each `src/Api/*.hs` currently has its own local `centsToEuroText`/`parseEuros` (not shared yet — see `DECISIONS.md` §8 for why that duplication is a known, deliberate-for-now tradeoff); `src/Domain/Types.hs` (`Cents`, `cents`, `centsValue`) is the one source of truth underneath all of them |
+| Change how euros are parsed/formatted on a page | `src/Api/Money.hs` — `parseSignedEuros`/`parseNonZeroSignedEuros`/`parsePositiveEuros`/`centsToEuroText`, shared by every `Api.*` module (DECISIONS.md §12, Architect review S-2). `Api.Accounts`'s reconcile field is the one field still on its own local non-negative parser, since it must accept `€0.00` but not negative — `parsePositiveEuros` would wrongly reject the former, `parseSignedEuros` would wrongly accept the latter, until that field's own signed-amount rework (Track A Step 4) |

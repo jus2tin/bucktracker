@@ -17,6 +17,7 @@ import Servant.HTML.Lucid (HTML)
 
 import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment, successBanner)
 import Api.Monad (AppM, withConn)
+import Api.Money (centsToEuroText)
 import qualified Db.Account as Db
 import qualified Db.Transaction as Db
 import Domain.Account (Account (accId, accName, accType), isArchived)
@@ -30,7 +31,6 @@ import Domain.Types
   , accountTypeFromText
   , accountTypeToText
   , cents
-  , centsValue
   )
 import Web.FormUrlEncoded (FromForm)
 
@@ -187,19 +187,6 @@ reconcileForm acc =
 accountIdText :: AccountId -> Text
 accountIdText (AccountId i) = Text.pack (show i)
 
-centsToEuroText :: Cents -> Text
-centsToEuroText amt =
-  sign <> Text.pack (show whole) <> "." <> pad2 frac
-  where
-    raw = centsValue amt
-    sign = if raw < 0 then "-" else ""
-    absValue = abs raw
-    whole = absValue `div` 100
-    frac = absValue `mod` 100
-    pad2 n =
-      let s = Text.pack (show n)
-      in if Text.length s < 2 then "0" <> s else s
-
 parseInt64 :: Text -> Maybe Int64
 parseInt64 t = case TextRead.decimal t of
   Right (n, rest) | Text.null rest -> Just n
@@ -207,6 +194,12 @@ parseInt64 t = case TextRead.decimal t of
 
 -- | Parses a non-negative decimal euro amount (e.g. @"12.34"@ or
 -- @"12"@) into whole cents, total and without 'Prelude.read'.
+--
+-- Deliberately still its own non-negative-only parser rather than
+-- 'Api.Money.parseSignedEuros' — the reconcile field allows a @0.00@
+-- statement balance (a fully-drained account), which
+-- 'Api.Money.parsePositiveEuros' would wrongly reject. Switching this
+-- field to accept negative (overdrawn) balances too is Track A Step 4.
 parseEuros :: Text -> Maybe Cents
 parseEuros raw = case Text.splitOn "." (Text.strip raw) of
   [wholePart] -> centsFromParts wholePart "00"

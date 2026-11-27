@@ -58,6 +58,42 @@ spec = with withTestApp $ do
       response <- postHtmlForm "/budget/assign" [("assignCategoryId", "1"), ("assignAmount", "not a number")]
       liftIO (bodyContains "Invalid amount" response `shouldBe` True)
 
+    it "accepts a negative assignment, moving money back toward Ready to Assign (S-2 fix)" $ do
+      -- Previously impossible: the unsigned-only parser rejected "-",
+      -- so money that had rolled into a category could never move
+      -- back out of it.
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      response <- postHtmlForm "/budget/assign" [("assignCategoryId", "1"), ("assignAmount", "-50.00")]
+      liftIO (bodyContains "-50.00" response `shouldBe` True)
+      -- zero inflows, assignedTotal = -50.00, so RTA = 0 - (-50.00) = 50.00
+      liftIO (bodyContains "Ready to Assign: 50.00" response `shouldBe` True)
+
+  describe "Carried In column" $
+    it "shows a Carried In figure alongside Assigned/Activity/Available" $ do
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      response <- get "/budget"
+      liftIO (bodyContains "Carried In" response `shouldBe` True)
+
+  describe "hiding zero-balance archived categories" $ do
+    it "hides an archived category once its balance is all zero" $ do
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "OldCategory"), ("groupId", "1")]
+      beforeArchive <- get "/budget"
+      liftIO (bodyContains "OldCategory" beforeArchive `shouldBe` True)
+      _ <- postHtmlForm "/categories/1/archive" []
+      afterArchive <- get "/budget"
+      liftIO (bodyContains "OldCategory" afterArchive `shouldBe` False)
+
+    it "still shows an archived category that carries a nonzero balance" $ do
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "OldCategory"), ("groupId", "1")]
+      _ <- postHtmlForm "/budget/assign" [("assignCategoryId", "1"), ("assignAmount", "25.00")]
+      _ <- postHtmlForm "/categories/1/archive" []
+      response <- get "/budget"
+      liftIO (bodyContains "OldCategory" response `shouldBe` True)
+
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody
 
