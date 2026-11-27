@@ -16,7 +16,7 @@ including known v0.1 limitations and what's deliberately still open.
 - **Database:** SQLite via `sqlite-simple` — hand-written, numbered `.sql` migrations
   and explicit `FromRow`/`ToRow` instances. No `persistent`/`beam`/`selda`, no TemplateHaskell.
 - **JSON:** `aeson` (use `Generic` + `DerivingVia` or explicit instances, no `TemplateHaskell`).
-- **Frontend:** Servant + Lucid + HTMX. Server-rendered HTML, no npm/JS build step.
+- **Frontend:** Servant + Lucid + HTMX + Pico CSS + Alpine.js. Server-rendered semantic HTML with locally vendored static assets (`static/`, served via `/static/*`), no npm/JS build step. Alpine.js is strictly for ephemeral local UI micro-interactions (integer-cents previews, dynamic split rows, inline-edit/modal toggles, shortcuts) — never persistent state or floating-point currency math (see `DECISIONS.md` §12).
 - **Auth:** No auth in v0.1 (runs on localhost only). Handlers already run in
   `ReaderT AppEnv Handler` (via `hoistServer`) so they're testable without a running server.
 - **Config:** Env vars. Defaults: port `8080`, SQLite path `%APPDATA%\bucktracker\bucktracker.db`

@@ -22,7 +22,7 @@ revisit later.
 | Area | Choice |
 |---|---|
 | Database | SQLite via `sqlite-simple`, hand-written numbered `.sql` migrations, explicit `FromRow`/`ToRow` (no TemplateHaskell, no `persistent`/`beam`). |
-| Frontend | Servant + Lucid + HTMX, server-rendered, no npm/JS build step. |
+| Frontend | Servant + Lucid + HTMX + Pico CSS + Alpine.js — server-rendered semantic HTML with locally vendored static assets (`/static/*`), no npm/JS build step (updated ahead of Phase 2, see §12). |
 | Auth | None in v0.1 (localhost-only). Does use `ReaderT AppEnv Handler` + `hoistServer` so handlers are testable without starting a real server. |
 | Config | Env vars. Defaults: port `8080`, DB path `%APPDATA%\bucktracker\bucktracker.db` on Windows — the path is configurable so a later Linux port (`$XDG_DATA_HOME` / `~/.local/share/bucktracker/bucktracker.db`) is trivial. |
 | IDs | `newtype` around `Int64`, auto-increment from SQLite (`rowid`). UUID only where dedup is needed later (import). |
@@ -466,3 +466,90 @@ later.
     door.
   - Deliberately **not fixed in this pass** — logged so it isn't lost,
     not yet acted on.
+
+## 12. Phase 2 decisions: Frontend & UX foundation, inline editing & bank import (2026-11-27)
+
+Decided at the start of Product Phase 2 (after the MVP adversarial
+review, `docs/reviews/2026-11-27-mvp-adversarial-review.md`) to turn
+Bucktracker into a fast, pleasant daily driver without compromising the
+zero-build-step, minimal-dependency, server-truthful architecture.
+
+### Static asset serving (vendored, zero build step)
+- **Delivery:** Static assets (`pico.min.css`, `htmx.min.js`,
+  `alpine.min.js` / `alpine-csp.min.js`, and a small local `app.js` if
+  needed) are checked into `static/`, listed under Cabal `data-files` in
+  `package.yaml` (the exact same mechanism already proven for
+  `migrations/*.sql`), located at runtime via
+  `Paths_bucktracker.getDataDir`, and served by Servant at `/static/*`
+  via `"static" :> Raw` (`Servant.Server.StaticFiles.serveDirectoryWebApp`,
+  already included in `servant-server`).
+- **Why:** Eliminates the v0.1 `unpkg.com` CDN dependency (`Api.Html`),
+  makes Bucktracker work **100% offline**, removes third-party network
+  calls from a personal finance app, and still requires **no Node, npm,
+  bundler, or asset pipeline**.
+
+### Low-level semantic CSS: Pico CSS (`pico.min.css`)
+- **Choice:** Adopt [Pico CSS](https://picocss.com/) (`pico.min.css`),
+  targeting semantic HTML elements (`<header>`, `<nav>`, `<main>`,
+  `<table>`, `<form>`, `<fieldset>`, `<dialog>`) inside a standard
+  `.container` wrapper.
+- **Why:** Gives clean typography, spacing, form/table styling, native
+  `<dialog>` modals, responsive layout, and automatic light/dark mode
+  (`prefers-color-scheme`) immediately, while keeping Haskell/Lucid
+  templates clean and free of Tailwind/Bootstrap utility-class noise.
+
+### Low-level client-side JS: Alpine.js (strictly ephemeral micro-interactions)
+- **Choice:** Add Alpine.js alongside HTMX **strictly** for local,
+  ephemeral UI state that should not require a server round-trip:
+  1. **Dynamic split-transaction editor:** Adding/removing split lines
+     (`1..N`) in the DOM and live-displaying unallocated remaining cents
+     before form submission (unlocking the arbitrary-length
+     `NonEmpty TransactionLine` that `Domain.Transaction` and
+     `Db.Transaction` already support).
+  2. **Live reconciliation math:** Computing
+     `Cleared Balance − Statement Balance = Remaining Difference` live
+     as the user types their bank statement balance.
+  3. **Inline edit toggles, `<dialog>` modals/drawers & keyboard
+     shortcuts:** Opening/closing quick-entry `<dialog>` modals or
+     drawers and handling keyboard shortcuts (e.g. `n` for new
+     transaction, `Escape` to cancel/close).
+- **Hard architectural boundary (non-negotiable):**
+  - **Server remains the sole source of truth.** HTMX + Servant + Lucid
+    still own all data fetching, persistence, validation, and canonical
+    HTML rendering. Alpine never owns persistent application state or
+    client-side routing.
+  - **No floating-point money in JS either.** Any client-side preview
+    arithmetic (split remainder, reconciliation difference) must parse
+    euro strings into whole integer cents first — never `parseFloat`
+    addition — and the Haskell `Domain`/`Db` layer still validates and
+    computes every persisted cent independently.
+  - **CSP compatibility:** Prefer `@alpinejs/csp` (`alpine-csp.min.js`)
+    with named `Alpine.data(...)` components in `/static/app.js` so
+    `Content-Security-Policy` can enforce `script-src 'self'` without
+    `'unsafe-eval'`. If standard `alpine.min.js` is used instead,
+    `'unsafe-eval'` in `script-src 'self' 'unsafe-eval'` must be
+    documented as an explicit local-only tradeoff (with external script
+    origins still completely blocked).
+
+### High-impact daily UX workflows promoted into Phase 2
+- **Inline cell editing on `/budget`:** Clicking directly on a
+  category's `Assigned` cell switches it to an inline `<input>` (Alpine
+  toggle) that saves via HTMX on `Enter` / `change` (`Escape` cancels)
+  and swaps `#budget-content`, replacing the detached top-of-page
+  assignment form as the primary budgeting interaction.
+- **Bank statement import (CSV & CAMT.053):** Promoted from §4's
+  out-of-scope list into Phase 2, leveraging `transactions.import_hash`:
+  - Pure parsers in `Domain.Import` for **CAMT.053** (ISO 20022 XML,
+    standard across Dutch/EU banks) and **CSV** (configurable/preset
+    delimiters and `.`/`,` decimals).
+  - Deterministic `ImportHash` scoped per account (`UNIQUE (account_id,
+    import_hash) WHERE import_hash IS NOT NULL`), incorporating the
+    within-statement occurrence index of identical `(date, amount,
+    payee/ref)` tuples so two legitimate identical purchases on the same
+    day are preserved while re-importing the same file is 100%
+    idempotent.
+  - **Two-step Import Preview → Commit UI (`/import`):** Because
+    Invariant 5 forbids uncategorized expenses in `transactions`, file
+    upload first renders a pure preview table flagging duplicates and
+    letting the user pick categories/transfers/inflows before committing
+    selected rows atomically (`Cleared` by default).

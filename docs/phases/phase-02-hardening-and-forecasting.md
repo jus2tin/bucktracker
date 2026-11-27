@@ -1,182 +1,171 @@
-# Phase 2 Plan — v0.1 Completion, Hardening & v0.2 Cash-Flow Forecasting
+# Phase 2 Plan — Frontend & UX Foundation, Hardening, Bank Import & Forecasting
 
 - **Date:** 2026-11-27
 - **Author:** Gemini (Architect), for Justin (Product Owner) & Claude (Developer)
 - **Prerequisite Review:** [`docs/reviews/2026-11-27-mvp-adversarial-review.md`](../reviews/2026-11-27-mvp-adversarial-review.md)
+- **Architectural Decisions:** [`DECISIONS.md` §§8–12](../../DECISIONS.md)
 
-> **Note on Phase Naming:** Earlier sections of [`DECISIONS.md`](../../DECISIONS.md) referred to the three internal layers of the initial build (`Domain`, `Db`, `Api`) as "Phase 1/2/3". At the product level, that entire MVP candidate was **Product Phase 1**. This document defines **Product Phase 2**, organized into three sequential tracks of concrete, commit-sized steps:
-> - **Track A (Steps 1–6):** Fix MVP showstoppers & complete `v0.1.0` daily-driver usability.
-> - **Track B (Steps 7–11):** Security, SQLite concurrency, online backups & zero-warning CI.
-> - **Track C (Steps 12–16):** Scheduled transactions & pure cash-flow projections (`v0.2.0` `/forecast`).
+> **Note on Phase Naming:** Earlier sections of [`DECISIONS.md`](../../DECISIONS.md) referred to the three internal layers of the initial build (`Domain`, `Db`, `Api`) as "Phase 1/2/3". At the product level, that initial MVP candidate was **Product Phase 1**. This document defines **Product Phase 2**, organized into three sequential tracks of concrete, commit-sized steps:
+> - **Track A (Steps 1–6):** Frontend & UX Foundation (Servant `/static/*`, Pico CSS, Alpine.js micro-interactions, inline `/budget` editing) + MVP showstopper remediation (`v0.1.0` daily driver).
+> - **Track B (Steps 7–12):** Security middleware, SQLite WAL concurrency, online backups, **CSV / CAMT.053 bank statement import**, and zero-warning `-Werror` CI.
+> - **Track C (Steps 13–17):** Scheduled transactions & pure cash-flow projections (`v0.2.0` `/forecast`).
 
 ---
 
 ## Execution Rules for the Developer (Claude)
 
 1. **One step (or tightly coupled pair) per PR/commit batch.** Keep diffs small and reviewable.
-2. **Same-commit documentation rule (`CLAUDE.md`):** Update [`ARCHITECTURE.md`](../../ARCHITECTURE.md) in the **same commit** whenever a step adds/changes a route, database table, or domain rule.
-3. **Total functions & strict warnings:** Maintain zero partial functions and ensure every step keeps `stack test` green.
-4. **Handoff paper trail:** At the end of each Track (A, B, and C), write a concise handoff summary in `docs/handoffs/YYYY-MM-DD-phase-02-track-<x>.md` using [`docs/handoffs/TEMPLATE.md`](../handoffs/TEMPLATE.md).
+2. **Zero-build-step & strict JS boundary (`DECISIONS.md` §12):** No Node, npm, or bundlers. Static assets live in `static/` via Cabal `data-files`. Alpine.js is **strictly** for ephemeral local UI state (never persistent state, never `Float`/`Double` currency math — integer cents only even in JS previews!).
+3. **Same-commit documentation rule (`CLAUDE.md`):** Update [`ARCHITECTURE.md`](../../ARCHITECTURE.md) in the **same commit** whenever a step adds/changes a route, static asset convention, database table, or domain rule.
+4. **Total functions & strict warnings:** Maintain zero partial functions (`head`, `read`, `fromJust`, `error`) and keep `stack test` green at every commit.
+5. **Handoff paper trail:** At the end of each Track (A, B, and C), write a concise handoff summary in `docs/handoffs/YYYY-MM-DD-phase-02-track-<x>.md` using [`docs/handoffs/TEMPLATE.md`](../handoffs/TEMPLATE.md).
 
 ---
 
-## Track A — v0.1 Release Blockers (Make the MVP Usable Daily)
+## Track A — Frontend & UX Foundation + MVP Blocker Remediation
 
-**Goal:** Eliminate all 4 showstoppers (`S-1`–`S-4`) and unfinished `v0.1` UX gaps (`H-1`, `H-2`, `L-1`, `L-2`) so the Product Owner can safely enter and manage real household finances.
+**Goal:** Establish the zero-build static asset pipeline (`Pico CSS` + `HTMX` + `Alpine.js`) at the very start so every subsequent fix and workflow (inline budget editing, dynamic N-way split editor, live reconciliation math, modals/shortcuts, transaction CRUD, month navigation) is built once on clean semantic HTML rather than rewritten twice.
 
-### Step 1 — Fix HTMX Double-Page Nesting & Progressive Form Fallback (`S-1`, `H-5`)
-- [ ] **Fix fragment rendering:** Separate full-page rendering (`GET /transactions`, `GET /budget`) from fragment rendering (`renderFragment` on `POST` actions) in `src/Api/Transactions.hs` and `src/Api/Budget.hs`, matching `Api.Accounts` and `Api.Categories` so HTMX swaps **only** `<div id="transactions-content">` / `<div id="budget-content">`.
-- [ ] **Add progressive HTML form attributes:** Add `method_ "post"` and `action_ "<route>"` to all 9 `<form>` elements across `Api.Accounts`, `Api.Categories`, `Api.Transactions`, and `Api.Budget`.
-- [ ] **Handle non-HTMX submissions cleanly:** Inspect the `HX-Request` request header (via Servant `Header "HX-Request" Text` or WAI): return the bare `#...-content` fragment when `HX-Request == Just "true"`, and wrap in `Api.Html.page` when submitted as a plain browser POST (e.g., if JS/HTMX is unavailable).
-- [ ] **Tests:** Add assertions in `Api.AccountsSpec`, `Api.CategoriesSpec`, `Api.TransactionsSpec`, and `Api.BudgetSpec` verifying that `POST` requests with `HX-Request: true` **never** contain `<!DOCTYPE html>` or `<nav>`.
+### Step 1 — Servant Static-Asset Route (`/static/*`) & Vendored Frontend Libraries (`DECISIONS.md` §12, `H-5`)
+- [ ] **Vendor assets in `static/`:** Add pinned, minified, zero-build files to `static/`:
+  - `static/pico.min.css` (Pico CSS v2 semantic stylesheet — typography, tables, forms, `<dialog>`, responsive `.container`, automatic light/dark mode).
+  - `static/htmx.min.js` (HTMX 2.0.3 — replaces the `unpkg.com` CDN `<script>` tag so Bucktracker works **100% offline**).
+  - `static/alpine-csp.min.js` (or `static/alpine.min.js` — see `DECISIONS.md` §12 CSP note; prefer `@alpinejs/csp` + `static/app.js` registering `Alpine.data(...)` helpers so Step 7's `Content-Security-Policy` can keep strict `script-src 'self'` without `'unsafe-eval'`).
+  - `static/app.js` — tiny, plain ES6 file holding integer-cent preview helpers (`parseEuroCents`, `formatEuroCents`) and Alpine component definitions (`splitEditor`, `reconcileCalc`, `inlineAssign`, global keyboard shortcuts).
+- [ ] **Wire Cabal `data-files` & `AppEnv`:** Add `static/*.css` and `static/*.js` under `data-files:` in `package.yaml` (mirroring `migrations/*.sql`). Resolve `staticDir <- (</> "static") <$> Paths_bucktracker.getDataDir` on startup (`Main.hs` + `Api.Setup`) and store `appStaticDir :: FilePath` on `AppEnv` (`src/Api/Monad.hs`).
+- [ ] **Mount `"static" :> Raw` in `src/Api.hs`:** Serve `appStaticDir` via `Servant.Server.StaticFiles.serveDirectoryWebApp` (built into `servant-server`, zero new dependencies). Ensure `<script defer src="/static/...">` ordering loads `app.js` / `alpine` cleanly alongside `htmx.min.js` (and re-initializes cleanly after HTMX fragment swaps).
+- [ ] **Tests & Docs:** Verify `GET /static/pico.min.css`, `GET /static/htmx.min.js`, and `GET /static/app.js` return `200 OK` with expected `Content-Type` headers in `test/Api/`, and document `/static/*` in `ARCHITECTURE.md`.
 
-### Step 2 — Extract Shared, Overflow-Safe `Api.Money` Codec & Support Signed Workflows (`S-2`)
-- [ ] **Deduplicate money parsing/formatting:** Create `src/Api/Money.hs` (or `Domain.Money`) and remove the 3 copy-pasted `centsToEuroText` / `parseEuros` / `centsFromParts` / `parseInt64` blocks from `Api.Accounts`, `Api.Transactions`, and `Api.Budget`.
-- [ ] **Provide explicit parsers by domain intent:**
-  - `parseSignedEuros :: Text -> Maybe Cents` — accepts optional leading `-` (and `,` or `.` decimal separator, e.g., `"-25.50"` or `"12,34"`). Use this for:
-    - **Budget assignments (`/budget/assign`):** allows negative assignments to move rolled-over funds back to Ready to Assign (remove `min_ "0"` on `assignAmount`).
-    - **Account reconciliation (`/accounts/:id/reconcile`):** allows reconciling overdrawn or liability accounts (remove `min_ "0"` on `statementBalance`).
-    - **Inflows (`/transactions/inflow`, non-zero):** allows negative opening balances or balance adjustments while rejecting `0.00`.
-    - **Categorized lines (`/transactions/spending`, non-zero):** either allow signed expense/refund amounts (e.g., positive expense vs. refund toggle/sign) or add a clear "Refund / credit" option so category returns credit the category directly rather than Ready to Assign.
-  - `parsePositiveEuros :: Text -> Maybe Cents` — strictly `> zeroCents` (rejects `<= 0`). Use this for **transfers** (`/transactions/transfer`).
-- [ ] **Overflow & `minBound` safety:** Bound parsed whole euros to a safe ceiling (e.g., `abs whole <= 100_000_000_000`, i.e., ±€100B, well below `Int64` overflow when multiplied by `100`) and fix `centsToEuroText` to use `Integer` (or `quotRem`) so `cents minBound` formats without double-minus or modulo sign bugs.
-- [ ] **Tests:** Unit/property tests in `test/Api/MoneySpec.hs` covering negative values, `,` decimals, zero rejection, `Int64` overflow inputs, and `cents minBound` round-tripping. Update `ARCHITECTURE.md` ("Where do I change X?").
+### Step 2 — Semantic Pico CSS Layout, HTMX Fragment Fix & Progressive Form Fallbacks (`S-1`, `H-5`)
+- [ ] **Adopt semantic Pico markup (`src/Api/Html.hs`):**
+  - Update `page` to link `/static/pico.min.css`, `/static/htmx.min.js`, `/static/app.js`, and `/static/alpine-csp.min.js` (`defer_ ""`), replacing custom inline CSS boilerplate with minimal semantic overrides (e.g., `.error`, `.success`, right-aligned numeric columns).
+  - Structure `body_` semantically as `<header class="container"><nav>...</nav></header><main class="container">...</main>` so Pico styles navigation, tables, forms, `<article>` cards, and `<dialog>` elements automatically in both light and dark mode without utility-class clutter.
+  - Add reusable Lucid attribute helpers needed across Track A (`hxConfirm_`, `hxTrigger_`, `hxGet_`, `xData_`, `xShow_`, `xText_`, `xOn_`, etc.).
+- [ ] **Fix HTMX full-page double-nesting bug (`S-1`):** Separate `GET` full-page handlers from `POST` fragment rendering in `src/Api/Transactions.hs` and `src/Api/Budget.hs` so HTMX swaps **only** `#transactions-content` / `#budget-content` (never nesting `<!DOCTYPE html>` or duplicate `<nav>` bars).
+- [ ] **Add progressive enhancement on all forms:** Add `method_ "post"` and `action_ "<route>"` to every `<form>` across all pages, and inspect `Header "HX-Request" Text` so plain non-HTMX browser POSTs receive a full `page` wrapper while HTMX requests receive the bare `#...-content` fragment.
+- [ ] **Tests:** Assert in all `Api.*Spec` modules that `POST` requests with `HX-Request: true` return fragments free of `<!DOCTYPE html>` and `<nav>`, while `GET` requests include Pico/HTMX/Alpine `/static/*` tags.
 
-### Step 3 — Add Transaction Delete & Edit Capabilities (`S-3`)
-- [ ] **Domain errors:** Add `CannotModifyReconciledTransaction` (and `TransactionNotFound TransactionId` if appropriate) to `src/Domain/Error.hs`.
-- [ ] **Database layer (`src/Db/Transaction.hs`):**
-  - Implement `deleteTransaction :: Connection -> TransactionId -> IO (Either DomainError ())`:
-    - Reject deleting a `Reconciled` transaction (or require unreconciling explicitly; never silently alter reconciled bank history).
-    - If the target row is a `TransferLeg` (`kind = 'transfer'`), atomically delete **both** legs sharing `transfer_id` and the parent `transfers` row (rejecting if either leg is `Reconciled`).
-    - For `Categorized` transactions, `ON DELETE CASCADE` on `transaction_lines` cleans up split lines automatically (verify in tests!).
-  - Implement `updateTransaction` (or edit routes for inflow/spending/transfer) upholding on-budget, distinct-account, matching-budget-status, and non-reconciled invariants.
-- [ ] **UI & API (`src/Api/Transactions.hs`):** Add a `Delete` button (with `hx-confirm`) and an edit workflow per non-`Reconciled` row on `/transactions`.
-- [ ] **Tests:** `Db.TransactionSpec` + `Api.TransactionsSpec` covering single-transaction deletion, atomic two-leg transfer deletion (verifying Invariant 1 & Invariant 2 still hold), cascade deletion of split lines, and rejection on `Reconciled` transactions.
+### Step 3 — Shared Overflow-Safe `Api.Money` Codec & Inline Cell Editing on `/budget` (`S-2`, `S-4` partial)
+- [ ] **Extract `src/Api/Money.hs`:** Deduplicate the 3 copy-pasted `centsToEuroText` / `parseEuros` blocks in `Api.Accounts`, `Api.Transactions`, and `Api.Budget`:
+  - `parseSignedEuros :: Text -> Maybe Cents` — supports optional leading `-` and both `.` and `,` decimal separators (`"-25.50"`, `"12,34"`), bounded to ±€100,000,000,000 (`abs whole <= 100_000_000_000`) so `whole * 100 + frac` can **never** overflow `Int64`.
+  - `parseNonZeroSignedEuros :: Text -> Maybe Cents` — signed, rejects `0.00`.
+  - `parsePositiveEuros :: Text -> Maybe Cents` — strictly `> zeroCents` (for transfers, or unsigned amounts).
+  - Fix `centsToEuroText` using `Integer` `quotRem` so `cents minBound` formats cleanly without double-minus or sign errors.
+- [ ] **Inline Cell Editing on `/budget` (`src/Api/Budget.hs`, `DECISIONS.md` §12):**
+  - Replace the detached top-of-page assignment form as the primary workflow: render each active category row's **`Assigned`** cell as an inline click-to-edit control (`x-data="inlineAssign(...)"`).
+  - Clicking the `Assigned` amount reveals an inline `<input>` pre-filled with the current euro amount (supporting negative assignments like `-50.00` to move rolled-over funds back to Ready to Assign!).
+  - Pressing `Enter` or blurring after a change (`change`) submits `POST /budget/assign` via HTMX and swaps `#budget-content` (atomically updating `Ready to Assign`, the row's `Available`, and group subtotals); pressing `Escape` cancels and restores the original display value without a server round-trip. Keep a standard `<noscript>` / progressive `<form>` inside the cell so non-JS form submission still works.
+- [ ] **Budget table clarity (`src/Api/Budget.hs`):**
+  - Add the **`Carried In`** column (`Carried In | Assigned | Activity | Available`) so `Carried In + Assigned + Activity == Available` is visibly self-consistent on every row.
+  - Group categories visually under their `CategoryGroup` headers, and hide archived categories whose `Carried In`, `Assigned`, `Activity`, and `Available` are all `0.00` (while keeping all categories in `rolloverMonths` so Invariant 1 always holds).
+- [ ] **Tests:** `test/Api/MoneySpec.hs` (signed, comma decimal, zero rejection, `Int64` overflow rejection, `minBound` formatting) + `test/Api/BudgetSpec.hs` (positive & negative inline assignment updates, `Carried In` visibility).
 
-### Step 4 — Month Navigation, Local Timezone & Register/Budget Table Completeness (`S-4`)
-- [ ] **Local date & form ergonomics:** Replace `utctDay <$> getCurrentTime` with local system date (`localDay . zonedTimeToLocalTime <$> getZonedTime`) in `Api.Transactions` and `Api.Budget`; default `<input type="date">` fields to today's local date; preserve user-submitted form values when re-rendering after a validation error.
-- [ ] **Month picker (`?month=YYYY-MM`):** Add an optional `QueryParam "month" Text` (`YYYY-MM`) + Previous / Current / Next month navigation controls to both `/budget` and `/transactions`. When a user adds a transaction dated outside the currently viewed month, display a `successBanner` with a clickable link to that transaction's month.
-- [ ] **Transactions register columns (`Api.Transactions`):** Add the missing **`Account`** column to `transactionsTable` and an optional `?account=<id>` filter so users can inspect a single account's register (wiring `Db.Transaction.listTransactionsForAccount` or month+account filtering), plus clickable links from `/accounts` rows to `/transactions?account=<id>`.
-- [ ] **Budget table clarity (`Api.Budget`):**
-  - Add the **`Carried In`** column (`Carried In | Assigned | Activity | Available`) so every row's math (`Carried In + Assigned + Activity == Available`) is transparent on screen.
-  - Group categories visually under their `CategoryGroup` headers.
-  - Keep **all** categories in `rolloverMonths` (preserving Invariant 1), but hide archived categories from the rendered table when `cmCarriedIn == 0 && cmAssigned == 0 && cmActivity == 0 && available cm == 0` (still showing archived categories that hold a non-zero balance so money is never hidden!).
+### Step 4 — Alpine.js Micro-Interactions: Dynamic Splits, Live Reconciliation & Shortcuts (`DECISIONS.md` §12, `S-2`)
+- [ ] **Dynamic N-way Split Editor + Live Unallocated Cents (`src/Api/Transactions.hs`, `static/app.js`):**
+  - Replace the rigid 3-slot `NewSpendingForm` with repeated form fields (`lineCategoryId`, `lineAmount`) parsed via an explicit `FromForm` instance (`lookupAll`), unlocking arbitrary `1..N` `NonEmpty TransactionLine` splits end-to-end! Support category refunds/credits cleanly (either signed line amounts or an Expense / Refund mode toggle).
+  - Add an Alpine `splitEditor` component that:
+    1. Lets the user enter an optional receipt total and dynamically **"+ Add split line"** / **"Remove"** rows in the DOM without a server round-trip.
+    2. Live-calculates `Receipt Total − Sum(Split Lines) = Unallocated Remaining` in **integer cents** in `/static/app.js` (highlighting in red/amber until `Remaining == 0.00`, while Haskell still derives `transactionAmount` strictly from the submitted lines per Invariant 3!).
+- [ ] **Live Reconciliation Difference on `/accounts` (`src/Api/Accounts.hs`, `static/app.js`):**
+  - Update `reconcileAccountHandler` to use `parseSignedEuros` (removing `min_ "0"`) so overdrawn checking or negative-balance liability accounts can be reconciled.
+  - Pass each account's `clearedBalance` (in integer cents via `data-cleared-cents`) into an Alpine `reconcileCalc` wrapper on the reconcile `<dialog>` / inline drawer so as the user types their bank statement figure, the UI immediately displays `Cleared (€X) − Statement (€Y) = Difference (€Z)` in real time before they even click "Reconcile".
+- [ ] **Lightweight `<dialog>` Modals/Drawers & Keyboard Shortcuts (`src/Api/Html.hs`, `src/Api/Transactions.hs`, `static/app.js`):**
+  - Declutter `/transactions` by housing the Inflow / Expense / Transfer entry forms inside clean semantic HTML `<dialog>` modals or collapsible `<details>`/drawers controlled by Alpine, plus global keyboard shortcuts when not focused in an input (e.g., `n` opens New Expense `<dialog>`, `i` opens New Inflow, `t` opens Transfer, `Escape` closes any open `<dialog>` or inline edit).
+- [ ] **Tests:** `Api.TransactionsSpec` testing 1-line, 2-line, and 5-line dynamic splits, category refunds, and negative inflows; `Api.AccountsSpec` testing negative statement reconciliation.
 
-### Step 5 — Two-Way Archiving with Confirmation & Server-Side Entity Guards (`H-1`, `H-2`)
-- [ ] **Unarchive + idempotent archive (`DECISIONS.md` §11):**
-  - Update `archiveAccount`, `archiveCategoryGroup`, and `archiveCategory` to use `WHERE id = ? AND archived_at IS NULL` and return whether a row was updated.
-  - Add `unarchiveAccount`, `unarchiveCategoryGroup`, and `unarchiveCategory` (`SET archived_at = NULL`) in `Db.Account` and `Db.Category`, plus `Unarchive` buttons on `/accounts` and `/categories`.
-  - Add `hx-confirm` attributes (`hxConfirm_`) to every `Archive` button across `/accounts` and `/categories`.
-- [ ] **Enforce archived & budget-type rules server-side (`Domain.Error` + `Db.*` + `Api.*`):**
-  - Reject creating categories inside an archived `CategoryGroup`, posting new transactions to archived accounts/categories, and assigning funds to archived categories (via `DomainError` variants enforced in `Db.*`, not just HTML dropdown filtering).
-  - Exclude `Tracking` accounts from `newSpendingForm`'s account `<select>` (`filter (\a -> not (isArchived a) && isOnBudget a)`).
-  - Hide `reconcileForm` on archived accounts (`Api.Accounts`).
-  - Block (or warn with `DomainError`) archiving an on-budget account with `accountBalance /= 0` or a category with `available /= 0` in the current month, and block archiving a `CategoryGroup` while it still has active child categories (or cascade-archive child categories with zero available balance).
-  - Render helpful empty-state onboarding prompts on `/budget` and `/transactions` when no active accounts or categories exist yet (disabling submit buttons instead of showing empty `<select>` boxes).
+### Step 5 — Transaction Delete/Edit, Month Navigation & Register Completeness (`S-3`, `S-4`)
+- [ ] **Transaction Delete & Edit (`src/Domain/Error.hs`, `src/Db/Transaction.hs`, `src/Api/Transactions.hs`):**
+  - Add `CannotModifyReconciledTransaction` to `DomainError`.
+  - Implement atomic `deleteTransaction`: block if `Reconciled`; if `TransferLeg`, delete **both** legs sharing `transfer_id` and the `transfers` row in one transaction; verify `ON DELETE CASCADE` removes `transaction_lines`.
+  - Implement `updateTransaction` (date, payee, account, category/split lines, or transfer amount/accounts) upholding all on-budget, distinct-account, matching-budget-status, and non-reconciled invariants.
+  - Expose Edit (`<dialog>` / inline row) and Delete (`hx-confirm`) controls on `/transactions`.
+- [ ] **Month Navigation & Local Timezone (`src/Api/Budget.hs`, `src/Api/Transactions.hs`):**
+  - Switch `utctDay <$> getCurrentTime` to local system date (`getZonedTime`), pre-fill `<input type="date">` with today's local date, and preserve user inputs on validation error.
+  - Add `?month=YYYY-MM` (`QueryParam "month" Text`) + `← Prev | YYYY-MM | Next →` navigation on both `/budget` and `/transactions`, and show a `successBanner` with a link when a newly created transaction falls outside the currently viewed month.
+- [ ] **Register Account Column & Per-Account Filter (`src/Api/Transactions.hs`, `src/Api/Accounts.hs`):**
+  - Add the missing **`Account`** column to `transactionsTable`, support `?account=<id>` filtering on `/transactions`, and link account names on `/accounts` to `/transactions?account=<id>`.
 
-### Step 6 — Fix Documentation Drift & Prepare `v0.1.0` Milestone Gate (`L-1`, `L-2`)
-- [ ] Fix `ARCHITECTURE.md` inaccuracies (`insertSpending` description, `renderFragment` description, and the `Api.Money` reference), remove the stale comment in `src/Api/Transactions.hs:14-16`, fix `github: "jus2tin/bucktracker"` in `package.yaml`, and write the `0.1.0.0` section in `CHANGELOG.md`.
-- [ ] **Track A Exit Gate:** Write `docs/handoffs/YYYY-MM-DD-phase-02-track-a.md`. At this point, `v0.1.0` is functionally complete and truthful to every promise in `DECISIONS.md` §§1–5 & §11.
+### Step 6 — Two-Way Archiving, Server-Side Entity Guards & Track A Sign-Off (`H-1`, `H-2`, `L-1`, `L-2`)
+- [ ] Add idempotent `archive*` (`WHERE id = ? AND archived_at IS NULL`), `unarchiveAccount`, `unarchiveCategoryGroup`, and `unarchiveCategory` in `Db.Account` / `Db.Category`, plus `hx-confirm` on every `Archive` button and `Unarchive` controls on `/accounts` and `/categories` (`DECISIONS.md` §11).
+- [ ] Enforce server-side guards in `Db.*` (returning `DomainError`s): reject new transactions/assignments on archived accounts/categories, reject creating categories in archived groups, block archiving accounts/categories with non-zero balances (or active child categories), filter `Tracking` accounts out of the Spending form's account picker, hide `reconcileForm` on archived accounts, and show onboarding empty states when zero accounts/categories exist.
+- [ ] Fix doc drift (`ARCHITECTURE.md`, `Api/Transactions.hs` header comment, `package.yaml` `github: "jus2tin/bucktracker"`, `CHANGELOG.md`).
+- [ ] **Track A Exit Gate:** Write `docs/handoffs/YYYY-MM-DD-phase-02-track-a.md`. Bucktracker is now a complete, polished, offline-capable daily money tracker.
 
 ---
 
-## Track B — Security, SQLite Concurrency & Operational Hardening
+## Track B — Security, Concurrency, Backups, Bank Import & CI
 
-**Goal:** Resolve the deferred architectural & security backlog (`DECISIONS.md` §§6–8) so Bucktracker is safe against browser-based localhost attacks, resilient under concurrent HTMX load, backed up automatically, and guarded by `-Werror` CI.
+**Goal:** Harden localhost security and SQLite concurrency, deliver automatic/manual backups, eliminate manual data-entry drudgery via **CSV / CAMT.053 bank statement import**, and lock everything behind `-Werror` CI.
 
-### Step 7 — Vendored HTMX, Security Headers & CSRF / DNS-Rebinding Middleware (`H-4`, `H-5`)
-- [ ] **Vendor HTMX locally:** Add `static/htmx-2.0.3.min.js` to Cabal `data-files` in `package.yaml`, serve `/static/htmx.min.js` from `Api`, and update `Api.Html.page` to `<script src="/static/htmx.min.js">`. Bucktracker now runs **100% offline** with zero third-party requests.
-- [ ] **Add `src/Api/Middleware.hs`:** Wrap `Api.application` with WAI middleware that:
-  1. **Blocks DNS rebinding:** Rejects requests whose `Host` header is not `localhost`, `localhost:<port>`, `127.0.0.1`, or `127.0.0.1:<port>` (`403 Forbidden`).
-  2. **Blocks CSRF:** On unsafe methods (`POST`, `PUT`, `PATCH`, `DELETE`), requires `Sec-Fetch-Site: same-origin` (or `Origin` matching `http://localhost:<port>` / `http://127.0.0.1:<port>`), rejecting cross-site submissions with `403 Forbidden`.
-  3. **Bounds request bodies:** Rejects request bodies larger than 64 KB (`413 Payload Too Large`).
-  4. **Sets security headers:** `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
-- [ ] **Tests:** `test/Api/SecuritySpec.hs` testing forged `Host`, cross-site `Origin` / `Sec-Fetch-Site: cross-site`, oversized POST bodies, security headers, and `/static/htmx.min.js` delivery.
+### Step 7 — Localhost Security Middleware: CSRF, DNS Rebinding, Body Limits & Strict CSP (`H-4`, `H-5`)
+- [ ] Create `src/Api/Middleware.hs` and wrap `Api.application`:
+  1. **`Host` allowlist (DNS-rebinding defense):** Accept only `localhost`, `localhost:<port>`, `127.0.0.1`, or `127.0.0.1:<port>` (`403 Forbidden` otherwise).
+  2. **Same-origin mutation check (CSRF defense):** On `POST`/`PUT`/`PATCH`/`DELETE`, require `Sec-Fetch-Site: same-origin` (or `Origin` matching `http://localhost:<port>` / `http://127.0.0.1:<port>`).
+  3. **Request body size cap:** Enforce a reasonable body limit (e.g., 64 KB on standard form routes, 10 MB strictly on the Step 10 statement-import route; `413 Payload Too Large` otherwise).
+  4. **Security headers:** `Content-Security-Policy` (`default-src 'self'; script-src 'self'` with `@alpinejs/csp`, `style-src 'self' 'unsafe-inline'; frame-ancestors 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
+- [ ] **Tests:** `test/Api/SecuritySpec.hs` covering forged `Host`, cross-origin `POST`, oversized payloads, and CSP headers.
 
 ### Step 8 — SQLite WAL Concurrency, Single-Checkout Snapshots & Batched Reads (`H-6`, `M-2`, `M-5`)
-- [ ] **Pool & PRAGMA lifecycle (`src/Db/Pool.hs`, `app/Main.hs`):**
-  - In `openConfigured`, wrap `open` with `bracketOnError`, run `PRAGMA busy_timeout = 5000` **first**, then `PRAGMA foreign_keys = ON` and `PRAGMA synchronous = NORMAL`.
-  - Run `PRAGMA journal_mode = WAL` **once** in `createPool` (not on every pooled connection), clean up `pool` via `onException` if `runMigrations` fails, and wrap `Main.main` in `bracket (createPool ...) closePool`.
-- [ ] **Immediate write transactions & typed lookup errors (`src/Db/Transaction.hs`):**
-  - Implement `withImmediateTransaction` (`BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` under `mask`) and use it for all multi-statement writes (`insertSpending`, `insertTransfer`, `setTransactionCleared`, `deleteTransaction`, `applyMigration`), eliminating deferred write-upgrade `SQLITE_BUSY` failures and moving `requireAccount` *inside* the transaction (fixing TOCTOU).
-  - Replace unexported `UnknownAccount` with `DomainError` (`AccountNotFound AccountId` / `CategoryNotFound CategoryId`); export `CorruptRow`; replace the wildcard `_` in `rowToTransaction` with explicit `"categorized"` matching.
-- [ ] **Single-checkout handlers & N+1 elimination (`src/Api/*`, `src/Db/Transaction.hs`):**
-  - Refactor each handler in `Api.Accounts`, `Api.Categories`, `Api.Transactions`, and `Api.Budget` to borrow **one** `Connection` per HTTP request (`withConn $ \conn -> ...`), wrapping multi-table reads in a consistent `DEFERRED` read snapshot.
-  - Replace per-row `fetchLines` in `listTransactionsForAccount`, `listTransactionsInMonth`, and `listAllTransactions` with a single batched query loading `transaction_lines` (grouped in Haskell via `Data.Map.Strict`), reducing 2,000+ queries per `/budget` load to **2 queries**.
+- [ ] Fix `src/Db/Pool.hs` & `app/Main.hs`: `PRAGMA busy_timeout = 5000` **first** in `openConfigured`, `PRAGMA journal_mode = WAL` + `synchronous = NORMAL` **once** in `createPool`, `bracketOnError` on connection/pool setup, and `bracket (createPool ...) closePool` in `Main.hs`.
+- [ ] Add `withImmediateTransaction` (`BEGIN IMMEDIATE`) in `Db` for all multi-statement writes (`insertSpending`, `insertTransfer`, `updateTransaction`, `deleteTransaction`, `setTransactionCleared`, `applyMigration`), move `requireAccount` inside the write transaction (fixing TOCTOU), replace unexported `UnknownAccount` with `DomainError` (`AccountNotFound` / `CategoryNotFound`), export `CorruptRow`, and match `"categorized"` explicitly in `rowToTransaction`.
+- [ ] Collapse multiple `withConn` calls per HTTP handler in `src/Api/*` into **one `withConn` per request** (inside a consistent read transaction for multi-table reads), and replace the N+1 `fetchLines` loop in `Db.Transaction` with a single batched `transaction_lines` query.
 
 ### Step 9 — Domain, Validation, Config & Schema Guardrails (`M-1`, `M-3`, `M-4`, `M-5`, `L-3`)
-- [ ] Reject `amount <= zeroCents` in `mkTransferPair` and `insertTransfer` (`TransferAmountMustBePositive`), bound `mkYearMonth` to `1900 <= y && y <= 9999` (`InvalidYear Int`), and bound `splitEvenly` / `scaleCents`.
-- [ ] Update `Domain.Validation.nonEmptyName` to return the **trimmed** name (`Text.strip`), enforce a max length (e.g., 120 characters, `NameTooLong`), reject control characters, and apply length validation to transaction `payee` as well.
-- [ ] Validate `BUCKTRACKER_PORT` (`1..65535`) and `nonempty` `BUCKTRACKER_DB_PATH` in `src/Config.hs`.
-- [ ] Add `migrations/0002_constraints_and_indexes.sql` adding a partial unique index on `transactions (import_hash) WHERE import_hash IS NOT NULL` and any non-invasive indexes (`assignments (year, month)`). Document why `0001_initial.sql`'s `PRAGMA foreign_keys = ON` is historic and keep `0001_initial.sql` immutable (since it is already applied in existing DBs).
+- [ ] Reject `amount <= zeroCents` in `mkTransferPair` / `insertTransfer`, bound `mkYearMonth` to `1900..9999`, bound `splitEvenly`, trim and cap names/payees (`<= 120` chars, no control chars) in `Domain.Validation`, and validate `BUCKTRACKER_PORT` (`1..65535`) + `nonempty` `BUCKTRACKER_DB_PATH` in `Config.hs`.
+- [ ] Add `migrations/0002_import_index_and_constraints.sql` creating:
+  - `CREATE UNIQUE INDEX idx_transactions_account_import_hash ON transactions (account_id, import_hash) WHERE import_hash IS NOT NULL;` (scoped per account so importing statements across multiple accounts never collides, while guaranteeing DB-level idempotency per account!).
+  - Index on `assignments (year, month)`.
 
-### Step 10 — Harden & Wire Online Backups (`H-3`, `DECISIONS.md` §7)
-- [ ] **Harden `src/Db/Backup.hs`:**
-  - Step in chunks of e.g. `100` pages (`Raw.backupStep backup 100`), sleeping briefly (`threadDelay 25000`) if contended rather than holding one monolithic `-1` lock.
-  - Canonicalize paths and reject `destPath == sourcePath`; create parent directories; write to `<destPath>.tmp` and atomically `renameFile` on `BackupDone` (removing `.tmp` on exception).
-- [ ] **Wire into runtime:**
-  - Automatically take a pre-migration backup (`backups/pre-migration-<timestamp>.db`) in `createPool` whenever pending migrations exist on a non-empty database file.
-  - Add a `POST /backups` UI trigger (e.g., in navigation/settings or `/accounts`) that writes a timestamped snapshot into `<dbDir>/backups/bucktracker-<UTC-timestamp>.db` (never accepting user-supplied file paths over HTTP) and displays a `successBanner`.
+### Step 10 — Bank Statement Import: CSV & CAMT.053 with `ImportHash` Deduplication (`DECISIONS.md` §12)
+- [ ] **Pure Import Engine (`src/Domain/Import.hs`, `Domain/Import/Csv.hs`, `Domain/Import/Camt053.hs`):**
+  - Define `RawStatementRow` (`rsrDate :: Day`, `rsrAmount :: Cents`, `rsrPayee :: Text`, `rsrDescription :: Text`, `rsrBankRef :: Maybe Text`, `rsrImportHash :: ImportHash`).
+  - **CAMT.053 parser (ISO 20022 XML):** Parse `<BkToCstmrStmt>` / `<Stmt>` / `<Ntry>` entries (booking/value date, EUR `<Amt>` signed via `<CdtDbtInd>` `CRDT`/`DBIT`, debtor/creditor `<RltdPties>` name, `<RmtInf>` remittance description, and `<AcctSvcrRef>` / `<EndToEndId>`), using a lightweight pure XML package from `lts-24.68` (e.g., `xml` or `xml-conduit`, no TemplateHaskell). Reject non-EUR statements with a clear `DomainError`.
+  - **CSV parser:** Total parser supporting `,` and `;` delimiters, quoted fields, ISO (`YYYY-MM-DD`) and European (`DD-MM-YYYY` / `DD/MM/YYYY`) dates, and `.` / `,` decimal amounts (single signed column or separate Debit/Credit columns) via clean column-mapping presets.
+  - **Collision-safe deterministic `ImportHash`:** Compute a canonical SHA-256 hex digest (e.g., via `crypton` / `cryptohash-sha256` in `lts-24.68`) over `(accountId, isoDate, centsValue, bankRefOrPayeeAndDesc, occurrenceIndexInFile)`. Including `occurrenceIndexInFile` (0th, 1st, 2nd identical tuple in that statement) ensures two real €2.50 coffees on the same day are **both** imported, while uploading the exact same statement file a second time skips 100% of rows!
+- [ ] **Database Deduplication & Atomic Batch Commit (`src/Db/Import.hs` or `Db.Transaction`):**
+  - `findExistingImportHashes :: Connection -> AccountId -> [ImportHash] -> IO (Set ImportHash)` to flag already-imported rows during preview.
+  - `commitImportedTransactions` inside a single `BEGIN IMMEDIATE` transaction: inserts selected rows as `Cleared` (`Inflow`, `Categorized`, or `Transfer` via `insertTransfer` when matched to another account), skipping any row whose `(account_id, import_hash)` already exists, and upholding `isOnBudget` / `sameBudgetStatus` invariants.
+- [ ] **Import Preview & Categorization UI (`src/Api/Import.hs`, mounted at `/import` + nav link):**
+  - **Step 1 (Upload):** Select target `Account`, format (`CAMT.053 XML` or `CSV` preset), and upload statement file (via bounded `wai-extra` multipart parsing or `servant-multipart`, no TH).
+  - **Step 2 (Interactive Preview & Categorize):** Render parsed rows in a Pico table showing new rows vs. *"Already imported — will skip"* badges:
+    - On `Tracking` accounts, new rows default directly to `Inflow` adjustments (one click to import).
+    - On `OnBudget` accounts, inflows default to `Ready to Assign` (or an optional category), while expenses require selecting a `Category` (or `Transfer` counterpart account) — preserving Invariant 5! Include an Alpine convenience helper so picking a category for `"Albert Heijn"` offers to auto-fill the same category on other `"Albert Heijn"` rows in the preview before submitting.
+  - **Step 3 (Commit):** `POST /import/commit` persists all categorized rows atomically and redirects/renders a summary banner (`"Imported N transactions (M duplicates skipped)"`).
+- [ ] **Tests:** `test/Domain/ImportSpec.hs` (CAMT.053 sample fixtures, CSV dialect fixtures, QuickCheck idempotency + same-day identical coffee preservation), `test/Db/ImportSpec.hs` (re-import deduplication, cross-account isolation), and `test/Api/ImportSpec.hs`.
 
-### Step 11 — Test Suite Cleanup, Zero-Warning Build & GitHub Actions CI (`M-6`, `L-4`, `L-5`)
-- [ ] Fix `test/Api/Setup.hs` (`around` + `bracket` closing the pool and deleting `.db`/`.db-wal`/`.db-shm` files after each test), clean up temp files in `MigrationsSpec` and `PoolSpec`, extract a shared UTF-8 `Api.TestHelpers` module (replacing `BSL8.unpack`), verify DB state on rejected POSTs, and expand `Domain.Gen` (days 29–31, Feb 29, Dec→Jan boundaries, `Tracking -> Tracking` transfers, distinct `TransferId`s).
-- [ ] Remove unused dependencies in `package.yaml` (`aeson`, `transformers`, `uuid`, `warp` from `library`; scope `text`/`time` per component) and resolve `-Worphans` warnings cleanly (either via `{-# OPTIONS_GHC -Wno-orphans #-}` on `Db.Field` + dedicated row types in `Db.*`, or documented module pragma) so `stack build --test --ghc-options=-Werror` compiles with **zero warnings**.
-- [ ] Add `.github/workflows/ci.yml` running `stack test --ghc-options=-Werror` on push and pull_request (Windows + Ubuntu matrix, caching `~/.stack` / `.stack-work`).
+### Step 11 — Harden & Wire Online Backups (`H-3`, `DECISIONS.md` §7)
+- [ ] Refactor `src/Db/Backup.hs` to step in bounded chunks (`100` pages) with brief backoff on contention, reject `destPath == sourcePath`, create parent directories, and write to `<destPath>.tmp` + atomic `renameFile`.
+- [ ] Take an automatic pre-migration backup (`<dbDir>/backups/pre-migration-<timestamp>.db`) when pending migrations exist on a non-empty DB, and add a `POST /backups` UI button saving timestamped snapshots into `<dbDir>/backups/`.
+
+### Step 12 — Test Suite Cleanup, Zero-Warning Build & GitHub Actions CI (`M-6`, `L-4`, `L-5`)
+- [ ] Clean up leaked pools and temp `.db`/`.db-wal`/`.db-shm` files in `test/Api/Setup.hs` (`around` + `bracket`), replace `BSL8.unpack` with UTF-8 `Text` helpers, verify non-mutation on rejected POSTs, and expand `Domain.Gen` edge cases.
+- [ ] Prune unused dependencies in `package.yaml`, resolve `-Worphans` cleanly, verify `stack test --ghc-options=-Werror` passes with **0 warnings**, and add `.github/workflows/ci.yml` (Windows + Ubuntu).
 - [ ] **Track B Exit Gate:** Write `docs/handoffs/YYYY-MM-DD-phase-02-track-b.md` and tag **`v0.1.0`**!
 
 ---
 
 ## Track C — Scheduled Transactions & Cash-Flow Projections (`v0.2.0`, `DECISIONS.md` §10)
 
-**Goal:** Deliver the Product Owner's core v0.2 capability — recurring bills, income, and future cash-flow/envelope projections on `/forecast` — while keeping the real ledger (`transactions`, `assignments`, `/budget`) 100% strictly historical/present-tense.
+**Goal:** Deliver recurring bills/income and future cash-flow/envelope simulation on `/forecast` while keeping `/budget` and `transactions` 100% strictly historical/present-tense.
 
 ### Architectural Rulings on `DECISIONS.md` §10's Open Questions
 
-To unblock implementation cleanly, the Architect proposes the following concrete rulings (subject to Product Owner override):
+1. **Recurrence Rule Representation:** Closed, total sum type (`Once | Weekly | EveryNDays PositiveInt | EveryNMonths PositiveInt`, clamping anchor day-of-month via `fromGregorian` so Jan 31 → Feb 28/29 → Mar 31) rather than RFC 5545 `RRULE` strings.
+2. **Lifecycle State:** `ScheduledItem` carries `siPaused :: Bool`, `siArchivedAt :: Maybe UTCTime`, optional `siEndDate :: Maybe Day`, and `siLastConfirmedDay :: Maybe Day` (preventing double-counting of occurrences already posted to the real ledger).
+3. **Projection Horizon:** Default **6 months** on `/forecast`, with `?months=3|6|12` selector (capped at `24` months server-side).
 
-1. **Recurrence Rule Representation:** Use a closed, total Haskell sum type rather than RFC 5545 `RRULE` strings:
-   ```haskell
-   data RecurrenceFrequency
-     = Once                           -- single future scheduled event on anchor date
-     | Weekly                         -- every 7 days from anchor date
-     | EveryNMonths PositiveInt       -- e.g., 1 = monthly, 3 = quarterly, 12 = yearly (clamping anchor day-of-month via fromGregorian, so anchor Jan 31 -> Feb 28/29 -> Mar 31)
-   ```
-   *Why:* Covers >98% of personal bills/paychecks (weekly, biweekly via `EveryNDays 14` if desired, monthly, quarterly, annual, one-off future tax bill), requires zero string parser complexity, makes illegal schedules unrepresentable, and is trivial to test with QuickCheck.
-2. **Lifecycle State:** `ScheduledItem` carries both `siPaused :: Bool` (temporarily skip in projections without losing the schedule) and `siArchivedAt :: Maybe UTCTime` (soft delete, consistent with `Account` and `Category`), plus optional `siEndDate :: Maybe Day` and `siLastConfirmedDay :: Maybe Day` (so already-entered occurrences in the current month are not double-counted in projections!).
-3. **Default Projection Horizon:** Default to **6 months** ahead on `/forecast`, with a simple selector for `3`, `6`, or `12` months (hard-capped at `24` months server-side to bound computation).
+### Step 13 — Pure `Domain.Schedule` & `Domain.Projection` Engine (`test/Domain/ProjectionSpec.hs`)
+- [ ] Implement `src/Domain/Schedule.hs` (`ScheduledItem`, `ScheduledAction`, `RecurrenceRule`, smart constructors, total `occurrencesInRange`) and `src/Domain/Projection.hs` (pure simulation expanding active schedules into synthetic future events and folding `Domain.Budget.rolloverMonths` forward into `ProjectedWorld`, with projected account runway and category shortfall warnings).
+- [ ] **QuickCheck properties (`test/Domain/ProjectionSpec.hs`):** Projected Invariant 1 holds at every simulated month; empty schedule list equals pure carry rollover; day-31 monthly clamping never drifts or crashes.
 
-### Step 12 — Pure `Domain.Schedule` & `Domain.Projection` Engine (`test/Domain/ProjectionSpec.hs`)
-- [ ] Create `src/Domain/Schedule.hs` defining `ScheduledItemId`, `ScheduledItem`, `ScheduledAction` (`ScheduledSpending (NonEmpty TransactionLine) | ScheduledInflow Cents | ScheduledTransfer AccountId Cents`), `RecurrenceRule`, smart constructors (enforcing positive transfer amounts, distinct accounts, non-empty payee), and total `occurrencesInRange :: ScheduledItem -> Day -> Day -> [Day]` (skipping dates `<= siLastConfirmedDay`, paused/archived items, and dates past `siEndDate`).
-- [ ] Create `src/Domain/Projection.hs` (strictly pure: no `IO`, no `Db`):
-  - Expand active `[ScheduledItem]` from `(today + 1 day)` (or unconfirmed occurrences from `startOfCurrentMonth`) through the end of `targetMonth` into synthetic `Transaction` values (validating on-budget rules).
-  - Reuse `Domain.Budget.rolloverMonths` (and optionally carry forward recurring monthly budget template assignments or zero future assignments — document clearly!) to produce `ProjectedWorld`:
-    - Month-by-month `MonthlyBudget`s (`[MonthlyBudget]`).
-    - Projected end-of-month (and daily minimum / runway) balances per `Account`.
-    - Category shortfall alerts (any category whose projected `available < zeroCents`).
-- [ ] **QuickCheck properties (`test/Domain/ProjectionSpec.hs`):**
-  1. **Projected Invariant 1:** At every projected month in `ProjectedWorld`, projected `onBudgetBalanceTotal == sum(projected category available) + projected Ready to Assign`!
-  2. **Identity law:** Projecting with `[]` (no scheduled items) equals folding `rolloverMonths` with zero future activity.
-  3. **Clamping totality:** Anchor day `31` in `EveryNMonths 1` produces valid dates in February (leap and non-leap) and 30-day months without drifting permanently to the 28th.
+### Step 14 — Persistence Layer for Scheduled Items (`migrations/0003_scheduled_items.sql`, `src/Db/ScheduledItem.hs`)
+- [ ] Create `scheduled_items` and `scheduled_item_lines` with strict `CHECK` constraints, plus CRUD, pause/archive, and atomic `confirmScheduledOccurrence` (inserting the real `Transaction` and advancing `last_confirmed_date` inside one `BEGIN IMMEDIATE` transaction).
 
-### Step 13 — Persistence Layer for Scheduled Items (`migrations/0003_scheduled_items.sql`, `src/Db/ScheduledItem.hs`)
-- [ ] Add `migrations/0003_scheduled_items.sql` creating `scheduled_items` and `scheduled_item_lines` (for split recurring bills, mirroring `transactions` + `transaction_lines`) with strict `CHECK` constraints matching `ScheduledAction` and `RecurrenceRule`.
-- [ ] Implement `src/Db/ScheduledItem.hs` (`insertScheduledItem`, `listScheduledItems`, `setScheduledItemPaused`, `archiveScheduledItem`, `unarchiveScheduledItem`, and atomic `confirmScheduledOccurrence` which inserts the real `Transaction` via `Db.Transaction` and updates `last_confirmed_date` inside one `BEGIN IMMEDIATE` transaction!).
-- [ ] **Tests:** `test/Db/ScheduledItemSpec.hs` testing round-trip CRUD, on-budget/transfer validation, batched line loading, and atomic confirmation into the real ledger.
+### Step 15 — Scheduled Items Management UI & "Post to Ledger" Workflow (`src/Api/Schedules.hs`)
+- [ ] Build `/schedules` (with Pico `<dialog>` forms + Alpine dynamic split support reused from Step 4!) for creating, pausing, archiving, and one-click **"Post to Ledger"** confirmation of due items.
 
-### Step 14 — Scheduled Items UI & "Confirm into Ledger" Action (`src/Api/Schedules.hs`)
-- [ ] Build routes and HTMX UI at `/schedules` (or integrated cleanly alongside `/forecast` + nav link in `Api.Html`) to:
-  - Create scheduled inflows, expenses (including splits), and transfers.
-  - Pause/resume, archive/unarchive, or delete scheduled items (with `hx-confirm`).
-  - Show **"Due / Upcoming"** items (`nextDueDay <= today`) with a one-click **"Post to Ledger"** button calling `confirmScheduledOccurrence` — turning a scheduled template into a real historical `Transaction` only upon explicit user action.
-- [ ] **Tests:** `test/Api/SchedulesSpec.hs`.
+### Step 16 — `/forecast` Cash-Flow & Envelope Projection Page (`src/Api/Forecast.hs`)
+- [ ] Mount `/forecast` (`?months=3|6|12`) displaying account cash-flow runway & lowest-balance overdraft alerts, month-by-month projected category `Available` balances (highlighting upcoming negative shortfalls), and net-worth/savings trajectory — while verifying `/budget` remains strictly real cash only.
 
-### Step 15 — `/forecast` Cash-Flow & Envelope Projection Page (`src/Api/Forecast.hs`)
-- [ ] Mount `ForecastApi` at `/forecast` (keeping `/budget` completely untouched and strictly real-money-only, per `DECISIONS.md` §10) with `?months=3|6|12` selector:
-  - **Cash-Flow Runway & Lowest Balance Summary:** Projected balance per on-budget and tracking account at each month-end, highlighting the lowest projected daily balance (overdraft warning if `< €0.00`).
-  - **Projected Category Balances Table:** Month-by-month projected `Available` per category, visually highlighting projected shortfalls (`< €0.00`) so the user sees upcoming underfunded bills months ahead.
-  - **Savings / Net-Worth Trajectory:** Projected total on-budget cash + tracking balances over the selected horizon.
-- [ ] **Tests:** `test/Api/ForecastSpec.hs` verifying that creating a scheduled bill changes `/forecast` while leaving `/budget` and `/accounts` completely unchanged until confirmed.
-
-### Step 16 — `v0.2.0` Documentation Sync, Handoff & Architect Review #2
-- [ ] Verify `ARCHITECTURE.md` and `CHANGELOG.md` (`0.2.0.0`) are fully up to date and `stack test --ghc-options=-Werror` passes cleanly.
-- [ ] Write `docs/handoffs/YYYY-MM-DD-phase-02-track-c.md` and request Architect Milestone Review #2 for `v0.2.0` release sign-off.
+### Step 17 — `v0.2.0` Documentation Sync, Handoff & Architect Review #2
+- [ ] Sync `ARCHITECTURE.md` and `CHANGELOG.md` (`0.2.0.0`), confirm `stack test --ghc-options=-Werror` is green, write `docs/handoffs/YYYY-MM-DD-phase-02-track-c.md`, and run Architect Milestone Review #2 for `v0.2.0` sign-off.
