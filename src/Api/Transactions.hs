@@ -43,6 +43,7 @@ import Servant.HTML.Lucid (HTML)
 
 import Api.Html
   ( errorBanner
+  , hxConfirm_
   , hxPost_
   , hxSwap_
   , hxTarget_
@@ -63,18 +64,20 @@ import Domain.Category (Category (catId, catName), isArchivedCategory)
 import Domain.Error (DomainError (..))
 import Domain.Transaction
   ( Categorization (Categorized, Inflow, TransferLeg)
-  , Transaction (txCategorization, txDate, txId, txPayee, txStatus)
-  , TransactionLine (TransactionLine, tlCategory)
+  , Transaction (txAccount, txCategorization, txDate, txId, txPayee, txStatus)
+  , TransactionLine (TransactionLine, tlAmount, tlCategory)
   , transactionAmount
   )
 import Domain.Types
   ( AccountId (AccountId)
   , CategoryId (CategoryId)
+  , Cents
   , TransactionId (TransactionId)
   , TransactionStatus (Reconciled, Uncleared)
   , dayToYearMonth
   , negateCents
   , transactionStatusToText
+  , zeroCents
   )
 import Web.FormUrlEncoded (Form, FromForm (fromForm), lookupAll, parseUnique)
 
@@ -84,6 +87,10 @@ type TransactionsApi =
     :<|> Header "HX-Request" Text :> "transactions" :> "spending" :> ReqBody '[FormUrlEncoded] NewSpendingForm :> Post '[HTML] (Html ())
     :<|> Header "HX-Request" Text :> "transactions" :> "transfer" :> ReqBody '[FormUrlEncoded] NewTransferForm :> Post '[HTML] (Html ())
     :<|> Header "HX-Request" Text :> "transactions" :> Capture "id" Int64 :> "clear" :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "transactions" :> Capture "id" Int64 :> "delete" :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "transactions" :> Capture "id" Int64 :> "edit-inflow" :> ReqBody '[FormUrlEncoded] NewInflowForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "transactions" :> Capture "id" Int64 :> "edit-spending" :> ReqBody '[FormUrlEncoded] NewSpendingForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "transactions" :> Capture "id" Int64 :> "edit-transfer" :> ReqBody '[FormUrlEncoded] NewTransferForm :> Post '[HTML] (Html ())
 
 -- | Each form's fields are prefixed so the three forms on one page
 -- never collide on a shared @name@ attribute (they share the page, not
@@ -138,12 +145,20 @@ transactionsServer =
     :<|> createSpendingHandler
     :<|> createTransferHandler
     :<|> toggleClearedHandler
+    :<|> deleteTransactionHandler
+    :<|> editInflowHandler
+    :<|> editSpendingHandler
+    :<|> editTransferHandler
 
 listTransactionsHandler :: AppM (Html ())
 listTransactionsHandler = renderFragment Nothing Nothing
 
-createInflowHandler :: Maybe Text -> NewInflowForm -> AppM (Html ())
-createInflowHandler hx form = case parseAccountId (inflowAccountId form) of
+-- | Parses and validates an inflow form's fields, then hands them to
+-- @go@ — shared by 'createInflowHandler' and 'editInflowHandler', which
+-- otherwise differ only in calling 'Db.insertInflow' or
+-- 'Db.updateInflow'.
+withValidInflow :: Maybe Text -> NewInflowForm -> (AccountId -> Day -> Text -> Cents -> AppM (Html ())) -> AppM (Html ())
+withValidInflow hx form go = case parseAccountId (inflowAccountId form) of
   Nothing -> withError hx "Unknown account."
   Just aid -> case parseIsoDate (inflowDate form) of
     Nothing -> withError hx "Invalid date."
@@ -153,12 +168,30 @@ createInflowHandler hx form = case parseAccountId (inflowAccountId form) of
         accounts <- withConn Db.listAccounts
         if not (any ((== aid) . accId) accounts)
           then withError hx "Unknown account."
-          else do
-            _ <- withConn (\conn -> Db.insertInflow conn aid day (inflowPayee form) defaultStatus amt Nothing)
-            renderFragment hx Nothing
+          else go aid day (inflowPayee form) amt
 
-createSpendingHandler :: Maybe Text -> NewSpendingForm -> AppM (Html ())
-createSpendingHandler hx form = case parseAccountId (spendingAccountId form) of
+createInflowHandler :: Maybe Text -> NewInflowForm -> AppM (Html ())
+createInflowHandler hx form = withValidInflow hx form $ \aid day payee amt -> do
+  _ <- withConn (\conn -> Db.insertInflow conn aid day payee defaultStatus amt Nothing)
+  renderFragment hx Nothing
+
+editInflowHandler :: Maybe Text -> Int64 -> NewInflowForm -> AppM (Html ())
+editInflowHandler hx rawId form = withValidInflow hx form $ \aid day payee amt -> do
+  result <- withConn (\conn -> Db.updateInflow conn (TransactionId rawId) aid day payee amt)
+  case result of
+    Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
+    Left _ -> withError hx "Could not update transaction."
+    Right _ -> renderFragment hx Nothing
+
+-- | Parses and validates a spending (split) form's fields, then hands
+-- them to @go@ — shared by 'createSpendingHandler' and
+-- 'editSpendingHandler'.
+withValidSpending
+  :: Maybe Text
+  -> NewSpendingForm
+  -> (AccountId -> Day -> Text -> NonEmpty TransactionLine -> AppM (Html ()))
+  -> AppM (Html ())
+withValidSpending hx form go = case parseAccountId (spendingAccountId form) of
   Nothing -> withError hx "Unknown account."
   Just aid -> case parseIsoDate (spendingDate form) of
     Nothing -> withError hx "Invalid date."
@@ -175,18 +208,32 @@ createSpendingHandler hx form = case parseAccountId (spendingAccountId form) of
             else
               if not (all (\l -> any ((== tlCategory l) . catId) categories) (toList lines'))
                 then withError hx "Unknown category."
-                else do
-                  result <-
-                    withConn
-                      (\conn -> Db.insertSpending conn aid day (spendingPayee form) defaultStatus lines' Nothing)
-                  case result of
-                    Left CategorizedTransactionRequiresOnBudgetAccount ->
-                      withError hx "Categorized transactions are not allowed on tracking accounts."
-                    Left _ -> withError hx "Could not create transaction."
-                    Right _ -> renderFragment hx Nothing
+                else go aid day (spendingPayee form) lines'
 
-createTransferHandler :: Maybe Text -> NewTransferForm -> AppM (Html ())
-createTransferHandler hx form = case parseAccountId (transferFromAccountId form) of
+createSpendingHandler :: Maybe Text -> NewSpendingForm -> AppM (Html ())
+createSpendingHandler hx form = withValidSpending hx form $ \aid day payee lines' -> do
+  result <- withConn (\conn -> Db.insertSpending conn aid day payee defaultStatus lines' Nothing)
+  case result of
+    Left CategorizedTransactionRequiresOnBudgetAccount ->
+      withError hx "Categorized transactions are not allowed on tracking accounts."
+    Left _ -> withError hx "Could not create transaction."
+    Right _ -> renderFragment hx Nothing
+
+editSpendingHandler :: Maybe Text -> Int64 -> NewSpendingForm -> AppM (Html ())
+editSpendingHandler hx rawId form = withValidSpending hx form $ \aid day payee lines' -> do
+  result <- withConn (\conn -> Db.updateSpending conn (TransactionId rawId) aid day payee lines')
+  case result of
+    Left CategorizedTransactionRequiresOnBudgetAccount ->
+      withError hx "Categorized transactions are not allowed on tracking accounts."
+    Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
+    Left _ -> withError hx "Could not update transaction."
+    Right _ -> renderFragment hx Nothing
+
+-- | Parses and validates a transfer form's fields, then hands them to
+-- @go@ — shared by 'createTransferHandler' and 'editTransferHandler'.
+withValidTransfer
+  :: Maybe Text -> NewTransferForm -> (AccountId -> AccountId -> Day -> Cents -> AppM (Html ())) -> AppM (Html ())
+withValidTransfer hx form go = case parseAccountId (transferFromAccountId form) of
   Nothing -> withError hx "Unknown account."
   Just fromAid -> case parseAccountId (transferToAccountId form) of
     Nothing -> withError hx "Unknown account."
@@ -198,14 +245,28 @@ createTransferHandler hx form = case parseAccountId (transferFromAccountId form)
           accounts <- withConn Db.listAccounts
           if not (all (`elem` map accId accounts) [fromAid, toAid])
             then withError hx "Unknown account."
-            else do
-              result <- withConn (\conn -> Db.insertTransfer conn (fromAid, toAid) day defaultStatus amt)
-              case result of
-                Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
-                Left TransferRequiresMatchingBudgetStatus ->
-                  withError hx "Cannot transfer between an on-budget and a tracking account."
-                Left _ -> withError hx "Could not create transfer."
-                Right _ -> renderFragment hx Nothing
+            else go fromAid toAid day amt
+
+createTransferHandler :: Maybe Text -> NewTransferForm -> AppM (Html ())
+createTransferHandler hx form = withValidTransfer hx form $ \fromAid toAid day amt -> do
+  result <- withConn (\conn -> Db.insertTransfer conn (fromAid, toAid) day defaultStatus amt)
+  case result of
+    Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
+    Left TransferRequiresMatchingBudgetStatus ->
+      withError hx "Cannot transfer between an on-budget and a tracking account."
+    Left _ -> withError hx "Could not create transfer."
+    Right _ -> renderFragment hx Nothing
+
+editTransferHandler :: Maybe Text -> Int64 -> NewTransferForm -> AppM (Html ())
+editTransferHandler hx rawId form = withValidTransfer hx form $ \fromAid toAid day amt -> do
+  result <- withConn (\conn -> Db.updateTransfer conn (TransactionId rawId) (fromAid, toAid) day amt)
+  case result of
+    Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
+    Left TransferRequiresMatchingBudgetStatus ->
+      withError hx "Cannot transfer between an on-budget and a tracking account."
+    Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
+    Left _ -> withError hx "Could not update transfer."
+    Right _ -> renderFragment hx Nothing
 
 -- | Toggles one transaction between Uncleared and Cleared from the
 -- register — the first step of reconciling (the second, account-wide
@@ -216,6 +277,19 @@ toggleClearedHandler :: Maybe Text -> Int64 -> AppM (Html ())
 toggleClearedHandler hx rawId = do
   withConn (\conn -> Db.setTransactionCleared conn (TransactionId rawId))
   renderFragment hx Nothing
+
+-- | Deletes a transaction (both legs, for a transfer) via
+-- 'Db.deleteTransaction'. Blocked server-side on an already-'Reconciled'
+-- transaction; the page itself never renders a Delete button for one
+-- (see 'deleteButton'), so this is defense in depth, not the only
+-- guard.
+deleteTransactionHandler :: Maybe Text -> Int64 -> AppM (Html ())
+deleteTransactionHandler hx rawId = do
+  result <- withConn (\conn -> Db.deleteTransaction conn (TransactionId rawId))
+  case result of
+    Left CannotModifyReconciledTransaction -> withError hx "Cannot delete a reconciled transaction."
+    Left _ -> withError hx "Could not delete transaction."
+    Right () -> renderFragment hx Nothing
 
 defaultStatus :: TransactionStatus
 defaultStatus = Uncleared
@@ -251,13 +325,18 @@ activeAccounts = filter (not . isArchived)
 activeCategories :: [Category] -> [Category]
 activeCategories = filter (not . isArchivedCategory)
 
-accountOption :: Account -> Html ()
-accountOption acc = option_ [value_ (idText (accId acc))] (toHtml (accName acc))
+-- | @selected@ pre-selects an option — used by the edit forms to show
+-- the transaction's current account; 'Nothing' (the create forms) just
+-- leaves the browser's own default (the first option) in place.
+accountOption :: Maybe AccountId -> Account -> Html ()
+accountOption selected acc =
+  option_ (value_ (idText (accId acc)) : [selected_ "" | selected == Just (accId acc)]) (toHtml (accName acc))
   where
     idText (AccountId i) = Text.pack (show i)
 
-categoryOption :: Category -> Html ()
-categoryOption cat = option_ [value_ (idText (catId cat))] (toHtml (catName cat))
+categoryOption :: Maybe CategoryId -> Category -> Html ()
+categoryOption selected cat =
+  option_ (value_ (idText (catId cat)) : [selected_ "" | selected == Just (catId cat)]) (toHtml (catName cat))
   where
     idText (CategoryId i) = Text.pack (show i)
 
@@ -278,11 +357,27 @@ newInflowForm accounts =
       , hxSwap_ "outerHTML"
       ]
       $ do
-        select_ [name_ "inflowAccountId"] (mapM_ accountOption (activeAccounts accounts))
+        select_ [name_ "inflowAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
         input_ [type_ "date", name_ "inflowDate"]
         input_ [type_ "text", name_ "inflowPayee", placeholder_ "Payee"]
         input_ [type_ "text", name_ "inflowAmount", placeholder_ "0.00 (negative = opening balance correction)"]
         button_ [type_ "submit"] "Add inflow"
+
+-- | The same shape as 'newInflowForm', pre-filled and pointed at the
+-- @edit-inflow@ route instead of @inflow@ — the "Edit" control inside
+-- 'editControls'.
+editInflowForm :: [Account] -> Transaction -> Cents -> Html ()
+editInflowForm accounts tx amt =
+  form_
+    [method_ "post", action_ routePath, hxPost_ routePath, hxTarget_ "#transactions-content", hxSwap_ "outerHTML"]
+    $ do
+      select_ [name_ "inflowAccountId"] (mapM_ (accountOption (Just (txAccount tx))) (activeAccounts accounts))
+      input_ [type_ "date", name_ "inflowDate", value_ (dayText (txDate tx))]
+      input_ [type_ "text", name_ "inflowPayee", value_ (txPayee tx)]
+      input_ [type_ "text", name_ "inflowAmount", value_ (centsToEuroText amt)]
+      button_ [type_ "submit"] "Save"
+  where
+    routePath = "/transactions/" <> transactionIdText (txId tx) <> "/edit-inflow"
 
 -- | The split editor: starts with one line, grows/shrinks via plain
 -- DOM cloning in the Alpine @splitEditor@ component
@@ -312,7 +407,7 @@ newSpendingForm accounts categories =
       , xData_ "splitEditor()"
       ]
       $ do
-        select_ [name_ "spendingAccountId"] (mapM_ accountOption (activeAccounts accounts))
+        select_ [name_ "spendingAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
         input_ [type_ "date", name_ "spendingDate"]
         input_ [type_ "text", name_ "spendingPayee", placeholder_ "Payee"]
         input_
@@ -321,17 +416,55 @@ newSpendingForm accounts categories =
           , xOn_ "input" "recalc()"
           , placeholder_ "Receipt total (optional)"
           ]
-        div_ [xRef_ "lines"] (splitLineRow categories)
+        div_ [xRef_ "lines"] (splitLineRow categories Nothing)
         button_ [type_ "button", xOn_ "click" "addLine()"] "+ Add split line"
         p_ [xText_ "remainingLabel"] ""
         button_ [type_ "submit"] "Add expense"
 
-splitLineRow :: [Category] -> Html ()
-splitLineRow categories =
+-- | The same shape as 'newSpendingForm', pre-filled (one row per
+-- existing split line) and pointed at @edit-spending@ instead of
+-- @spending@.
+editSpendingForm :: [Account] -> [Category] -> Transaction -> NonEmpty TransactionLine -> Html ()
+editSpendingForm accounts categories tx lines' =
+  form_
+    [ method_ "post"
+    , action_ routePath
+    , hxPost_ routePath
+    , hxTarget_ "#transactions-content"
+    , hxSwap_ "outerHTML"
+    , xData_ "splitEditor()"
+    ]
+    $ do
+      select_ [name_ "spendingAccountId"] (mapM_ (accountOption (Just (txAccount tx))) (activeAccounts accounts))
+      input_ [type_ "date", name_ "spendingDate", value_ (dayText (txDate tx))]
+      input_ [type_ "text", name_ "spendingPayee", value_ (txPayee tx)]
+      input_
+        [ type_ "text"
+        , xModel_ "receiptTotal"
+        , xOn_ "input" "recalc()"
+        , placeholder_ "Receipt total (optional)"
+        ]
+      div_ [xRef_ "lines"] $
+        mapM_ (\l -> splitLineRow categories (Just (tlCategory l, negateCents (tlAmount l)))) (toList lines')
+      button_ [type_ "button", xOn_ "click" "addLine()"] "+ Add split line"
+      p_ [xText_ "remainingLabel"] ""
+      button_ [type_ "submit"] "Save"
+  where
+    routePath = "/transactions/" <> transactionIdText (txId tx) <> "/edit-spending"
+
+-- | @prefill@ is @(category, typed amount)@ — note this is the amount
+-- as the user *typed* it (positive = expense), the negation of the
+-- stored, already-negated 'tlAmount' — so an edit form shows the same
+-- figure a fresh entry would have asked for, not the sign-flipped
+-- stored one.
+splitLineRow :: [Category] -> Maybe (CategoryId, Cents) -> Html ()
+splitLineRow categories prefill =
   div_ [class_ "split-line"] $ do
-    select_ [name_ "lineCategoryId"] (mapM_ categoryOption (activeCategories categories))
+    select_ [name_ "lineCategoryId"] (mapM_ (categoryOption (fst <$> prefill)) (activeCategories categories))
     input_
-      [type_ "text", name_ "lineAmount", placeholder_ "0.00 (negative = refund)", xOn_ "input" "recalc()"]
+      ( [type_ "text", name_ "lineAmount", placeholder_ "0.00 (negative = refund)", xOn_ "input" "recalc()"]
+          ++ maybe [] (\(_, amt) -> [value_ (centsToEuroText amt)]) prefill
+      )
     button_ [type_ "button", xOn_ "click" "removeLine($event)"] "Remove"
 
 -- | Wrapped in @\<details\>@ (id @new-transfer-details@, the @t@
@@ -348,25 +481,50 @@ newTransferForm accounts =
       , hxSwap_ "outerHTML"
       ]
       $ do
-        select_ [name_ "transferFromAccountId"] (mapM_ accountOption (activeAccounts accounts))
-        select_ [name_ "transferToAccountId"] (mapM_ accountOption (activeAccounts accounts))
+        select_ [name_ "transferFromAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
+        select_ [name_ "transferToAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
         input_ [type_ "date", name_ "transferDate"]
         input_ [type_ "number", step_ "0.01", min_ "0", name_ "transferAmount", placeholder_ "0.00"]
         button_ [type_ "submit"] "Add transfer"
 
+-- | The same shape as 'newTransferForm', pre-filled and pointed at
+-- @edit-transfer@ instead of @transfer@. @counterpartAcc@/@legAmount@
+-- come from whichever leg's "Edit" was clicked (see 'editControls');
+-- the stored sign tells us which side is "from" (negative — this leg
+-- loses money) and which is "to" (positive), since both legs of the
+-- *same* transfer get replaced together either way (there's no single
+-- "the" leg being edited independently of the other).
+editTransferForm :: [Account] -> Transaction -> AccountId -> Cents -> Html ()
+editTransferForm accounts tx counterpartAcc legAmount =
+  form_
+    [method_ "post", action_ routePath, hxPost_ routePath, hxTarget_ "#transactions-content", hxSwap_ "outerHTML"]
+    $ do
+      select_ [name_ "transferFromAccountId"] (mapM_ (accountOption (Just fromAccId)) (activeAccounts accounts))
+      select_ [name_ "transferToAccountId"] (mapM_ (accountOption (Just toAccId)) (activeAccounts accounts))
+      input_ [type_ "date", name_ "transferDate", value_ (dayText (txDate tx))]
+      input_ [type_ "number", step_ "0.01", min_ "0", name_ "transferAmount", value_ (centsToEuroText absAmount)]
+      button_ [type_ "submit"] "Save"
+  where
+    routePath = "/transactions/" <> transactionIdText (txId tx) <> "/edit-transfer"
+    (fromAccId, toAccId, absAmount)
+      | legAmount < zeroCents = (txAccount tx, counterpartAcc, negateCents legAmount)
+      | otherwise = (counterpartAcc, txAccount tx, legAmount)
+
 transactionsTable :: [Account] -> [Category] -> [Transaction] -> Html ()
 transactionsTable accounts categories transactions = table_ $ do
-  thead_ (tr_ (mapM_ (th_ . toHtml) (["Date", "Payee", "Category", "Amount", "Status", ""] :: [Text])))
+  thead_ (tr_ (mapM_ (th_ . toHtml) (["Date", "Payee", "Category", "Amount", "Status", "", "", ""] :: [Text])))
   tbody_ (mapM_ (transactionRow accounts categories) transactions)
 
 transactionRow :: [Account] -> [Category] -> Transaction -> Html ()
 transactionRow accounts categories tx = tr_ $ do
-  td_ (toHtml (Text.pack (show (txDate tx))))
+  td_ (toHtml (dayText (txDate tx)))
   td_ (toHtml (txPayee tx))
   td_ (toHtml (categorizationText accounts categories (txCategorization tx)))
   td_ [class_ "amount"] (toHtml (centsToEuroText (transactionAmount tx)))
   td_ (toHtml (transactionStatusToText (txStatus tx)))
   td_ (clearButton tx)
+  td_ (editControls accounts categories tx)
+  td_ (deleteButton tx)
 
 -- | Lets the register mark a transaction as seen on the bank statement
 -- (Uncleared <-> Cleared, see Domain.Types.toggleCleared) — the first
@@ -383,8 +541,51 @@ clearButton tx
              [type_ "submit", hxPost_ routePath, hxTarget_ "#transactions-content", hxSwap_ "outerHTML"]
              (if txStatus tx == Uncleared then "Clear" else "Unclear")
 
+-- | A per-row @\<details\>@ holding whichever edit form matches this
+-- transaction's kind ('editInflowForm'\/'editSpendingForm'\/
+-- 'editTransferForm') — the plan's "inline row" alternative to a
+-- @\<dialog\>@ (Track A Step 5), same reasoning as the entry drawers in
+-- Step 4. Nothing renders here once a transaction is 'Reconciled':
+-- there's nothing a submit could do but fail server-side anyway (see
+-- 'Db.updateInflow' and friends).
+editControls :: [Account] -> [Category] -> Transaction -> Html ()
+editControls accounts categories tx
+  | txStatus tx == Reconciled = mempty
+  | otherwise =
+      details_ [id_ ("edit-details-" <> transactionIdText (txId tx))] $ do
+        summary_ "Edit"
+        case txCategorization tx of
+          Inflow amt -> editInflowForm accounts tx amt
+          TransferLeg _ counterpartAcc amt -> editTransferForm accounts tx counterpartAcc amt
+          Categorized ls -> editSpendingForm accounts categories tx ls
+
+-- | No button once a transaction is 'Reconciled' — the server-side
+-- guard in 'Db.deleteTransaction' is the real enforcement
+-- ('CannotModifyReconciledTransaction'), this is just not offering a
+-- control that can only ever fail.
+deleteButton :: Transaction -> Html ()
+deleteButton tx
+  | txStatus tx == Reconciled = mempty
+  | otherwise =
+      let routePath = "/transactions/" <> transactionIdText (txId tx) <> "/delete"
+      in form_ [method_ "post", action_ routePath] $
+           button_
+             [ type_ "submit"
+             , hxPost_ routePath
+             , hxTarget_ "#transactions-content"
+             , hxSwap_ "outerHTML"
+             , hxConfirm_ "Delete this transaction? This cannot be undone."
+             ]
+             "Delete"
+
 transactionIdText :: TransactionId -> Text
 transactionIdText (TransactionId i) = Text.pack (show i)
+
+-- | An HTML @\<input type="date"\>@ value (@"YYYY-MM-DD"@) — 'Day's
+-- 'Show' instance already renders that, so there's no separate format
+-- string to keep in sync with 'parseIsoDate'.
+dayText :: Day -> Text
+dayText = Text.pack . show
 
 categorizationText :: [Account] -> [Category] -> Categorization -> Text
 categorizationText _ categories (Categorized ls) =

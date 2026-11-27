@@ -30,4 +30,11 @@ data DomainError
     -- 'Domain.Budget.categoryActivity'/'available'). Enforced by
     -- 'Db.Transaction.insertSpending'.
     CategorizedTransactionRequiresOnBudgetAccount
+  | -- | A delete or edit targeted a transaction whose status is
+    -- 'Domain.Types.Reconciled'. Reconciling is meant to be a lock: once
+    -- an account's balance has been confirmed against a bank statement,
+    -- changing what it was reconciled from would silently invalidate
+    -- that confirmation. Enforced by 'Db.Transaction.deleteTransaction'
+    -- and the @update*@ family.
+    CannotModifyReconciledTransaction
   deriving stock (Eq, Show)

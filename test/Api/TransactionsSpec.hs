@@ -246,6 +246,84 @@ spec = with withTestApp $ do
       afterSecondToggle <- postHtmlForm "/transactions/1/clear" []
       liftIO (bodyContains "uncleared" afterSecondToggle `shouldBe` True)
 
+  describe "POST /transactions/:id/delete" $ do
+    it "removes the transaction from the register" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      response <- postHtmlForm "/transactions/1/delete" []
+      liftIO (bodyContains "Salary" response `shouldBe` False)
+
+    it "is blocked on an already-Reconciled transaction, with an error message" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      _ <- postHtmlForm "/transactions/1/clear" []
+      _ <- postHtmlForm "/accounts/1/reconcile" [("statementBalance", "100.00")]
+      response <- postHtmlForm "/transactions/1/delete" []
+      liftIO (bodyContains "Cannot delete a reconciled transaction" response `shouldBe` True)
+      liftIO (bodyContains "Salary" response `shouldBe` True)
+
+  describe "POST /transactions/:id/edit-inflow" $
+    it "updates the payee and amount shown in the register" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Corrected Salary"), ("inflowAmount", "150.00")]
+      liftIO (bodyContains "Corrected Salary" response `shouldBe` True)
+      liftIO (bodyContains "150.00" response `shouldBe` True)
+      liftIO (bodyContains "100.00" response `shouldBe` False)
+
+  describe "POST /transactions/:id/edit-spending" $
+    it "updates the split lines shown in the register" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Household"), ("groupId", "1")]
+      day <- liftIO today
+      _ <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "40.00")
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingDate", day)
+          , ("spendingPayee", "Corrected")
+          , ("lineCategoryId", "2")
+          , ("lineAmount", "25.00")
+          ]
+      liftIO (bodyContains "Household" response `shouldBe` True)
+      liftIO (bodyContains "-25.00" response `shouldBe` True)
+      liftIO (bodyContains "-40.00" response `shouldBe` False)
+
+  describe "POST /transactions/:id/edit-transfer" $
+    it "updates the accounts and amount of both legs" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Savings"), ("accountType", "savings")]
+      _ <- postHtmlForm "/accounts" [("name", "Cash"), ("accountType", "cash")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "3"), ("transferDate", day), ("transferAmount", "75.00")]
+      liftIO (bodyContains "Transfer: Cash" response `shouldBe` True)
+      liftIO (bodyContains "75.00" response `shouldBe` True)
+
 -- | A spending form post with a single split line.
 singleLineSpending :: String -> String -> String -> String -> [(String, String)]
 singleLineSpending day accountId categoryId amount =

@@ -6,7 +6,8 @@ import Db.Account (insertAccount)
 import Db.Category (insertCategory, insertCategoryGroup)
 import Db.Setup (expectRight, withTestDb)
 import Db.Transaction
-  ( getTransaction
+  ( deleteTransaction
+  , getTransaction
   , insertInflow
   , insertSpending
   , insertTransfer
@@ -14,19 +15,23 @@ import Db.Transaction
   , listTransactionsInMonth
   , reconcileAccount
   , setTransactionCleared
+  , updateInflow
+  , updateSpending
+  , updateTransfer
   )
 import Domain.Account (Account (accId))
 import Domain.Category (Category (catId), CategoryGroup (cgId))
 import Domain.Error
   ( DomainError
-      ( CategorizedTransactionRequiresOnBudgetAccount
+      ( CannotModifyReconciledTransaction
+      , CategorizedTransactionRequiresOnBudgetAccount
       , TransferRequiresDistinctAccounts
       , TransferRequiresMatchingBudgetStatus
       )
   )
 import Domain.Transaction
   ( Categorization (Categorized, Inflow)
-  , Transaction (txCategorization, txId, txStatus)
+  , Transaction (txAccount, txCategorization, txId, txPayee, txStatus)
   , TransactionLine (TransactionLine)
   , transactionAmount
   )
@@ -147,3 +152,110 @@ spec = around withTestDb $
       fmap txStatus reconciledResult `shouldBe` Just Reconciled
       fmap txStatus stillUnclearedResult `shouldBe` Just Uncleared
       fmap txStatus otherAccResult `shouldBe` Just Cleared -- untouched: different account
+
+    it "deleteTransaction removes a plain inflow, and is a no-op on an unknown id" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 100) Nothing
+      result <- deleteTransaction conn (txId tx)
+      result `shouldBe` Right ()
+      getTransaction conn (txId tx) >>= (`shouldBe` Nothing)
+
+      noopResult <- deleteTransaction conn (txId tx)
+      noopResult `shouldBe` Right ()
+
+    it "deleteTransaction removes both legs of a transfer" $ \conn -> do
+      from <- insertAccount conn "Checking Account" Checking >>= expectRight
+      to <- insertAccount conn "Savings Account" Checking >>= expectRight
+      (legFrom, legTo) <-
+        insertTransfer conn (accId from, accId to) (fromGregorian 2026 1 10) Uncleared (cents 10000)
+          >>= expectRight
+      result <- deleteTransaction conn (txId legFrom)
+      result `shouldBe` Right ()
+      getTransaction conn (txId legFrom) >>= (`shouldBe` Nothing)
+      getTransaction conn (txId legTo) >>= (`shouldBe` Nothing)
+
+    it "deleteTransaction is blocked on an already-Reconciled transaction" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 100) Nothing
+      setTransactionCleared conn (txId tx)
+      reconcileAccount conn (accId acc)
+      result <- deleteTransaction conn (txId tx)
+      result `shouldBe` Left CannotModifyReconciledTransaction
+      afterAttempt <- getTransaction conn (txId tx)
+      fmap txStatus afterAttempt `shouldBe` Just Reconciled
+
+    it "updateInflow replaces the fields in place, preserving status, and leaves nothing stale behind" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      otherAcc <- insertAccount conn "Savings Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 100) Nothing
+      setTransactionCleared conn (txId tx)
+      result <-
+        updateInflow conn (txId tx) (accId otherAcc) (fromGregorian 2026 1 5) "Corrected Salary" (cents 200)
+      case result of
+        Right (Just edited) -> do
+          txAccount edited `shouldBe` accId otherAcc
+          txPayee edited `shouldBe` "Corrected Salary"
+          txCategorization edited `shouldBe` Inflow (cents 200)
+          txStatus edited `shouldBe` Cleared
+        _ -> expectationFailure ("expected Right (Just _), got " <> show result)
+      -- the old account keeps no trace of it (not even under a reused id —
+      -- SQLite's rowid allocator can reuse a deleted row's id, so "the old
+      -- id resolves to Nothing" isn't a safe assertion here)
+      listTransactionsForAccount conn (accId acc) >>= (`shouldBe` [])
+
+    it "updateInflow is blocked on an already-Reconciled transaction, without changing it" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 100) Nothing
+      setTransactionCleared conn (txId tx)
+      reconcileAccount conn (accId acc)
+      result <- updateInflow conn (txId tx) (accId acc) (fromGregorian 2026 1 1) "Changed" (cents 999)
+      result `shouldBe` Left CannotModifyReconciledTransaction
+      afterAttempt <- getTransaction conn (txId tx)
+      fmap txPayee afterAttempt `shouldBe` Just "Salary"
+
+    it "updateSpending replaces the split lines in place" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      group <- insertCategoryGroup conn "Groceries" >>= expectRight
+      cat1 <- insertCategory conn (cgId group) "Supermarket" >>= expectRight
+      cat2 <- insertCategory conn (cgId group) "Drugstore" >>= expectRight
+      let original = TransactionLine (catId cat1) (cents (-3000)) :| []
+      tx <- insertSpending conn (accId acc) (fromGregorian 2026 1 5) "Supermarket" Uncleared original Nothing >>= expectRight
+      let edited' = TransactionLine (catId cat1) (cents (-1000)) :| [TransactionLine (catId cat2) (cents (-500))]
+      result <- updateSpending conn (txId tx) (accId acc) (fromGregorian 2026 1 6) "Corrected" edited'
+      case result of
+        Right (Just edited) -> txCategorization edited `shouldBe` Categorized edited'
+        _ -> expectationFailure ("expected Right (Just _), got " <> show result)
+      -- exactly one transaction on the account now, with the edited lines
+      -- (not the original lines still sitting there alongside it)
+      remaining <- listTransactionsForAccount conn (accId acc)
+      map txCategorization remaining `shouldBe` [Categorized edited']
+
+    it "updateSpending onto a tracking account is rejected, without changing the original" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      tracking <- insertAccount conn "Investments" Tracking >>= expectRight
+      group <- insertCategoryGroup conn "Groceries" >>= expectRight
+      cat <- insertCategory conn (cgId group) "Supermarket" >>= expectRight
+      let lines' = TransactionLine (catId cat) (cents (-3000)) :| []
+      tx <- insertSpending conn (accId acc) (fromGregorian 2026 1 5) "Supermarket" Uncleared lines' Nothing >>= expectRight
+      result <- updateSpending conn (txId tx) (accId tracking) (fromGregorian 2026 1 5) "Supermarket" lines'
+      result `shouldBe` Left CategorizedTransactionRequiresOnBudgetAccount
+      afterAttempt <- getTransaction conn (txId tx)
+      fmap txCategorization afterAttempt `shouldBe` Just (Categorized lines')
+
+    it "updateTransfer replaces both legs, accounts, and amount together" $ \conn -> do
+      from <- insertAccount conn "Checking Account" Checking >>= expectRight
+      to <- insertAccount conn "Savings Account" Checking >>= expectRight
+      other <- insertAccount conn "Cash" Checking >>= expectRight
+      (legFrom, legTo) <-
+        insertTransfer conn (accId from, accId to) (fromGregorian 2026 1 10) Uncleared (cents 10000)
+          >>= expectRight
+      result <- updateTransfer conn (txId legFrom) (accId from, accId other) (fromGregorian 2026 1 11) (cents 5000)
+      case result of
+        Right (Just (editedFrom, editedTo)) -> do
+          txAccount editedFrom `shouldBe` accId from
+          txAccount editedTo `shouldBe` accId other
+          transactionAmount editedFrom <> transactionAmount editedTo `shouldBe` zeroCents
+          transactionAmount editedFrom `shouldBe` cents (-5000)
+        _ -> expectationFailure ("expected Right (Just _), got " <> show result)
+      -- the original "to" account (Savings) keeps no trace of the old leg
+      listTransactionsForAccount conn (accId to) >>= (`shouldBe` [])
