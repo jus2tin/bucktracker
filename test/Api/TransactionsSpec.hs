@@ -76,6 +76,24 @@ spec = with withTestApp $ do
           [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "not a number")]
       liftIO (bodyContains "Invalid amount" response `shouldBe` True)
 
+    it "accepts a negative amount, as an opening-balance correction (S-2.4 fix)" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Correction"), ("inflowAmount", "-50.00")]
+      liftIO (bodyContains "-50.00" response `shouldBe` True)
+
+    it "rejects a zero amount" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "0.00")]
+      liftIO (bodyContains "Invalid amount" response `shouldBe` True)
+
   describe "POST /transactions/spending" $ do
     it "creates a categorized expense and shows it in the register, stored as negative" $ do
       _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
@@ -99,15 +117,70 @@ spec = with withTestApp $ do
           [ ("spendingAccountId", "1")
           , ("spendingDate", day)
           , ("spendingPayee", "Supermarket")
-          , ("spendingCategoryId1", "1")
-          , ("spendingAmount1", "40.00")
-          , ("spendingCategoryId2", "2")
-          , ("spendingAmount2", "24.30")
-          , ("spendingCategoryId3", "")
-          , ("spendingAmount3", "")
+          , ("lineCategoryId", "1")
+          , ("lineAmount", "40.00")
+          , ("lineCategoryId", "2")
+          , ("lineAmount", "24.30")
           ]
       liftIO (bodyContains "Groceries, Household" response `shouldBe` True)
       liftIO (bodyContains "-64.30" response `shouldBe` True) -- 40.00 + 24.30, derived, not stored separately
+
+    it "splits an expense across five categories" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Cat1"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Cat2"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Cat3"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Cat4"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Cat5"), ("groupId", "1")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingDate", day)
+          , ("spendingPayee", "Supermarket")
+          , ("lineCategoryId", "1")
+          , ("lineAmount", "10.00")
+          , ("lineCategoryId", "2")
+          , ("lineAmount", "10.00")
+          , ("lineCategoryId", "3")
+          , ("lineAmount", "10.00")
+          , ("lineCategoryId", "4")
+          , ("lineAmount", "10.00")
+          , ("lineCategoryId", "5")
+          , ("lineAmount", "10.00")
+          ]
+      liftIO (bodyContains "Cat1, Cat2, Cat3, Cat4, Cat5" response `shouldBe` True)
+      liftIO (bodyContains "-50.00" response `shouldBe` True)
+
+    it "accepts a negative line amount as a refund/credit against that category (S-2.3 fix)" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Household"), ("groupId", "1")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingDate", day)
+          , ("spendingPayee", "Supermarket refund")
+          , ("lineCategoryId", "1")
+          , ("lineAmount", "40.00")
+          , ("lineCategoryId", "2")
+          , ("lineAmount", "-15.00")
+          ]
+      -- net total: -40.00 + 15.00 = -25.00
+      liftIO (bodyContains "-25.00" response `shouldBe` True)
+
+    it "rejects a zero-amount split line" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      day <- liftIO today
+      response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "0.00")
+      liftIO (bodyContains "Invalid amount" response `shouldBe` True)
 
     it "rejects a categorized expense on a tracking account" $ do
       _ <- postHtmlForm "/accounts" [("name", "Investments"), ("accountType", "tracking")]
@@ -173,20 +246,14 @@ spec = with withTestApp $ do
       afterSecondToggle <- postHtmlForm "/transactions/1/clear" []
       liftIO (bodyContains "uncleared" afterSecondToggle `shouldBe` True)
 
--- | A spending form post with only the first (required) split line
--- filled in — lines 2/3 blank, as they'd be if a user never touched
--- them (see Api.Transactions.parseOptionalLine).
+-- | A spending form post with a single split line.
 singleLineSpending :: String -> String -> String -> String -> [(String, String)]
 singleLineSpending day accountId categoryId amount =
   [ ("spendingAccountId", accountId)
   , ("spendingDate", day)
   , ("spendingPayee", "Supermarket")
-  , ("spendingCategoryId1", categoryId)
-  , ("spendingAmount1", amount)
-  , ("spendingCategoryId2", "")
-  , ("spendingAmount2", "")
-  , ("spendingCategoryId3", "")
-  , ("spendingAmount3", "")
+  , ("lineCategoryId", categoryId)
+  , ("lineAmount", amount)
   ]
 
 bodyContains :: String -> SResponse -> Bool

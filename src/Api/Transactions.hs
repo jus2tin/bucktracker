@@ -2,14 +2,24 @@
 -- only (CLAUDE.md "Architecture") — the real logic already lives in
 -- 'Db.Transaction'/'Domain.Transaction'.
 --
--- The spending form supports splits across up to three categories
--- (amounts typed as positive expenses, stored negated) without any
--- client-side JS: the first line is required, the other two are
--- simply skipped if their amount is left blank (see 'parseOptionalLine').
--- A genuine arbitrary-length split (already supported end-to-end by
--- 'Db.Transaction.insertSpending'/'Domain.Transaction') would need a
--- dynamic "add another line" control; three fixed slots cover the
--- common case without that complexity.
+-- The spending form supports a genuine arbitrary-length split
+-- (@1..N@ lines — already supported end-to-end by
+-- 'Db.Transaction.insertSpending'/'Domain.Transaction', just not
+-- reachable from the UI until now): 'NewSpendingForm' has a manual
+-- 'FromForm' instance collecting every @lineCategoryId@/@lineAmount@
+-- pair via 'lookupAll' rather than deriving fixed-name fields, and the
+-- page adds/removes rows client-side (@static/app.js@'s @splitEditor@)
+-- without a server round-trip. A line's amount is *signed*: a positive
+-- amount is the usual expense portion, a negative one is a refund/
+-- credit against that category (Architect review S-2.3) — the same
+-- 'negateCents' that turns a typed @40.00@ into a stored @-€40@ turns a
+-- typed @-15.00@ into a stored @+€15@, so refunds needed no change to
+-- that convention, only to the parser accepting a sign at all.
+--
+-- 'NewInflowForm's amount is signed too (negative = an opening-balance
+-- correction; still rejects exactly zero, Architect review S-2.4); a
+-- transfer's amount stays strictly positive — the direction is already
+-- chosen by which account is "from" and which is "to".
 --
 -- The register always shows the *current* calendar month — there's no
 -- month picker yet, consistent with there being no multi-month
@@ -22,7 +32,6 @@ module Api.Transactions
 import Control.Monad.IO.Class (liftIO)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
-import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
@@ -32,9 +41,20 @@ import Lucid
 import Servant
 import Servant.HTML.Lucid (HTML)
 
-import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment)
+import Api.Html
+  ( errorBanner
+  , hxPost_
+  , hxSwap_
+  , hxTarget_
+  , pageOrFragment
+  , xData_
+  , xModel_
+  , xOn_
+  , xRef_
+  , xText_
+  )
 import Api.Monad (AppM, withConn)
-import Api.Money (centsToEuroText, parsePositiveEuros)
+import Api.Money (centsToEuroText, parseNonZeroSignedEuros, parsePositiveEuros)
 import qualified Db.Account as Db
 import qualified Db.Category as Db
 import qualified Db.Transaction as Db
@@ -56,7 +76,7 @@ import Domain.Types
   , negateCents
   , transactionStatusToText
   )
-import Web.FormUrlEncoded (FromForm)
+import Web.FormUrlEncoded (Form, FromForm (fromForm), lookupAll, parseUnique)
 
 type TransactionsApi =
   "transactions" :> Get '[HTML] (Html ())
@@ -77,19 +97,30 @@ data NewInflowForm = NewInflowForm
   deriving stock (Generic)
   deriving anyclass (FromForm)
 
+-- | A manual 'FromForm' instance instead of 'Generic' deriving:
+-- @lineCategoryId@/@lineAmount@ each repeat once per split line
+-- ('lookupAll' collects every value under that key, in submission
+-- order), rather than the fixed @spendingCategoryIdN@/@spendingAmountN@
+-- field names the old 3-slot form used. Pairing them back up by
+-- position (see 'parseSplitLines') relies on the page always emitting
+-- a line's two inputs together, which @splitLineHtml@ does.
 data NewSpendingForm = NewSpendingForm
-  { spendingAccountId   :: Text
-  , spendingDate        :: Text
-  , spendingPayee       :: Text
-  , spendingCategoryId1 :: Text
-  , spendingAmount1     :: Text
-  , spendingCategoryId2 :: Text
-  , spendingAmount2     :: Text
-  , spendingCategoryId3 :: Text
-  , spendingAmount3     :: Text
+  { spendingAccountId :: Text
+  , spendingDate      :: Text
+  , spendingPayee     :: Text
+  , spendingLineCategoryIds :: [Text]
+  , spendingLineAmounts     :: [Text]
   }
-  deriving stock (Generic)
-  deriving anyclass (FromForm)
+
+instance FromForm NewSpendingForm where
+  fromForm :: Form -> Either Text NewSpendingForm
+  fromForm f =
+    NewSpendingForm
+      <$> parseUnique "spendingAccountId" f
+      <*> parseUnique "spendingDate" f
+      <*> parseUnique "spendingPayee" f
+      <*> pure (lookupAll "lineCategoryId" f)
+      <*> pure (lookupAll "lineAmount" f)
 
 data NewTransferForm = NewTransferForm
   { transferFromAccountId :: Text
@@ -116,7 +147,7 @@ createInflowHandler hx form = case parseAccountId (inflowAccountId form) of
   Nothing -> withError hx "Unknown account."
   Just aid -> case parseIsoDate (inflowDate form) of
     Nothing -> withError hx "Invalid date."
-    Just day -> case parsePositiveEuros (inflowAmount form) of
+    Just day -> case parseNonZeroSignedEuros (inflowAmount form) of
       Nothing -> withError hx "Invalid amount."
       Just amt -> do
         accounts <- withConn Db.listAccounts
@@ -131,30 +162,28 @@ createSpendingHandler hx form = case parseAccountId (spendingAccountId form) of
   Nothing -> withError hx "Unknown account."
   Just aid -> case parseIsoDate (spendingDate form) of
     Nothing -> withError hx "Invalid date."
-    Just day -> case parseRequiredLine (spendingCategoryId1 form) (spendingAmount1 form) of
-      Left err -> withError hx err
-      Right line1 -> case parseOptionalLine (spendingCategoryId2 form) (spendingAmount2 form) of
+    Just day ->
+      case parseSplitLines (zip (spendingLineCategoryIds form) (spendingLineAmounts form)) of
         Left err -> withError hx err
-        Right maybeLine2 -> case parseOptionalLine (spendingCategoryId3 form) (spendingAmount3 form) of
-          Left err -> withError hx err
-          Right maybeLine3 -> do
-            let lines' = line1 :| catMaybes [maybeLine2, maybeLine3]
-            accounts <- withConn Db.listAccounts
-            categories <- withConn Db.listCategories
-            if not (any ((== aid) . accId) accounts)
-              then withError hx "Unknown account."
-              else
-                if not (all (\l -> any ((== tlCategory l) . catId) categories) (toList lines'))
-                  then withError hx "Unknown category."
-                  else do
-                    result <-
-                      withConn
-                        (\conn -> Db.insertSpending conn aid day (spendingPayee form) defaultStatus lines' Nothing)
-                    case result of
-                      Left CategorizedTransactionRequiresOnBudgetAccount ->
-                        withError hx "Categorized transactions are not allowed on tracking accounts."
-                      Left _ -> withError hx "Could not create transaction."
-                      Right _ -> renderFragment hx Nothing
+        Right [] -> withError hx "A split needs at least one line."
+        Right (line1 : restLines) -> do
+          let lines' = line1 :| restLines
+          accounts <- withConn Db.listAccounts
+          categories <- withConn Db.listCategories
+          if not (any ((== aid) . accId) accounts)
+            then withError hx "Unknown account."
+            else
+              if not (all (\l -> any ((== tlCategory l) . catId) categories) (toList lines'))
+                then withError hx "Unknown category."
+                else do
+                  result <-
+                    withConn
+                      (\conn -> Db.insertSpending conn aid day (spendingPayee form) defaultStatus lines' Nothing)
+                  case result of
+                    Left CategorizedTransactionRequiresOnBudgetAccount ->
+                      withError hx "Categorized transactions are not allowed on tracking accounts."
+                    Left _ -> withError hx "Could not create transaction."
+                    Right _ -> renderFragment hx Nothing
 
 createTransferHandler :: Maybe Text -> NewTransferForm -> AppM (Html ())
 createTransferHandler hx form = case parseAccountId (transferFromAccountId form) of
@@ -232,64 +261,98 @@ categoryOption cat = option_ [value_ (idText (catId cat))] (toHtml (catName cat)
   where
     idText (CategoryId i) = Text.pack (show i)
 
+-- | Wrapped in @\<details\>@ (id @new-inflow-details@, targeted by the
+-- @i@ keyboard shortcut in @static/app.js@) rather than a
+-- @\<dialog\>@: plain, native, no JS needed for open/close, no focus-
+-- trap to get wrong — "lightweight ... drawers" was explicitly offered
+-- as the plan's simpler alternative (Track A Step 4).
 newInflowForm :: [Account] -> Html ()
 newInflowForm accounts =
-  form_
-    [ method_ "post"
-    , action_ "/transactions/inflow"
-    , hxPost_ "/transactions/inflow"
-    , hxTarget_ "#transactions-content"
-    , hxSwap_ "outerHTML"
-    ]
-    $ do
-      select_ [name_ "inflowAccountId"] (mapM_ accountOption (activeAccounts accounts))
-      input_ [type_ "date", name_ "inflowDate"]
-      input_ [type_ "text", name_ "inflowPayee", placeholder_ "Payee"]
-      input_ [type_ "number", step_ "0.01", min_ "0", name_ "inflowAmount", placeholder_ "0.00"]
-      button_ [type_ "submit"] "Add inflow"
+  details_ [id_ "new-inflow-details"] $ do
+    summary_ "New Inflow"
+    form_
+      [ method_ "post"
+      , action_ "/transactions/inflow"
+      , hxPost_ "/transactions/inflow"
+      , hxTarget_ "#transactions-content"
+      , hxSwap_ "outerHTML"
+      ]
+      $ do
+        select_ [name_ "inflowAccountId"] (mapM_ accountOption (activeAccounts accounts))
+        input_ [type_ "date", name_ "inflowDate"]
+        input_ [type_ "text", name_ "inflowPayee", placeholder_ "Payee"]
+        input_ [type_ "text", name_ "inflowAmount", placeholder_ "0.00 (negative = opening balance correction)"]
+        button_ [type_ "submit"] "Add inflow"
 
+-- | The split editor: starts with one line, grows/shrinks via plain
+-- DOM cloning in the Alpine @splitEditor@ component
+-- (@static/app.js@) — no @x-for@/@\<template\>@, just
+-- @lines.lastElementChild.cloneNode(true)@, which sidesteps relying on
+-- more elaborate templating support from the vendored Alpine CSP
+-- build. Every line's two inputs share the same @name@ attributes
+-- (@lineCategoryId@\/@lineAmount@) regardless of how many lines exist
+-- — 'lookupAll' on the server collects all of them, so no per-row
+-- indexed naming is needed. The "Receipt total" field is never
+-- submitted (no @name@ attribute): it only feeds the live client-side
+-- "Unallocated" calculation, which Haskell never trusts — it still
+-- derives @transactionAmount@ strictly from whatever lines actually
+-- arrive (invariant 3).
+-- | Wrapped in @\<details\>@ (id @new-expense-details@, the @n@
+-- keyboard shortcut) — see 'newInflowForm'.
 newSpendingForm :: [Account] -> [Category] -> Html ()
 newSpendingForm accounts categories =
-  form_
-    [ method_ "post"
-    , action_ "/transactions/spending"
-    , hxPost_ "/transactions/spending"
-    , hxTarget_ "#transactions-content"
-    , hxSwap_ "outerHTML"
-    ]
-    $ do
-      select_ [name_ "spendingAccountId"] (mapM_ accountOption (activeAccounts accounts))
-      input_ [type_ "date", name_ "spendingDate"]
-      input_ [type_ "text", name_ "spendingPayee", placeholder_ "Payee"]
-      splitLine "spendingCategoryId1" "spendingAmount1" "0.00" categories
-      splitLine "spendingCategoryId2" "spendingAmount2" "0.00 (optional)" categories
-      splitLine "spendingCategoryId3" "spendingAmount3" "0.00 (optional)" categories
-      button_ [type_ "submit"] "Add expense"
+  details_ [id_ "new-expense-details"] $ do
+    summary_ "New Expense"
+    form_
+      [ method_ "post"
+      , action_ "/transactions/spending"
+      , hxPost_ "/transactions/spending"
+      , hxTarget_ "#transactions-content"
+      , hxSwap_ "outerHTML"
+      , xData_ "splitEditor()"
+      ]
+      $ do
+        select_ [name_ "spendingAccountId"] (mapM_ accountOption (activeAccounts accounts))
+        input_ [type_ "date", name_ "spendingDate"]
+        input_ [type_ "text", name_ "spendingPayee", placeholder_ "Payee"]
+        input_
+          [ type_ "text"
+          , xModel_ "receiptTotal"
+          , xOn_ "input" "recalc()"
+          , placeholder_ "Receipt total (optional)"
+          ]
+        div_ [xRef_ "lines"] (splitLineRow categories)
+        button_ [type_ "button", xOn_ "click" "addLine()"] "+ Add split line"
+        p_ [xText_ "remainingLabel"] ""
+        button_ [type_ "submit"] "Add expense"
 
--- | One split line: a category picker plus an amount. Leaving the
--- amount blank on an optional line (see 'parseOptionalLine') is how a
--- split with fewer than three lines works, without JS to add/remove
--- rows.
-splitLine :: Text -> Text -> Text -> [Category] -> Html ()
-splitLine categoryFieldName amountFieldName amountPlaceholder categories = do
-  select_ [name_ categoryFieldName] (mapM_ categoryOption (activeCategories categories))
-  input_ [type_ "number", step_ "0.01", min_ "0", name_ amountFieldName, placeholder_ amountPlaceholder]
+splitLineRow :: [Category] -> Html ()
+splitLineRow categories =
+  div_ [class_ "split-line"] $ do
+    select_ [name_ "lineCategoryId"] (mapM_ categoryOption (activeCategories categories))
+    input_
+      [type_ "text", name_ "lineAmount", placeholder_ "0.00 (negative = refund)", xOn_ "input" "recalc()"]
+    button_ [type_ "button", xOn_ "click" "removeLine($event)"] "Remove"
 
+-- | Wrapped in @\<details\>@ (id @new-transfer-details@, the @t@
+-- keyboard shortcut) — see 'newInflowForm'.
 newTransferForm :: [Account] -> Html ()
 newTransferForm accounts =
-  form_
-    [ method_ "post"
-    , action_ "/transactions/transfer"
-    , hxPost_ "/transactions/transfer"
-    , hxTarget_ "#transactions-content"
-    , hxSwap_ "outerHTML"
-    ]
-    $ do
-      select_ [name_ "transferFromAccountId"] (mapM_ accountOption (activeAccounts accounts))
-      select_ [name_ "transferToAccountId"] (mapM_ accountOption (activeAccounts accounts))
-      input_ [type_ "date", name_ "transferDate"]
-      input_ [type_ "number", step_ "0.01", min_ "0", name_ "transferAmount", placeholder_ "0.00"]
-      button_ [type_ "submit"] "Add transfer"
+  details_ [id_ "new-transfer-details"] $ do
+    summary_ "New Transfer"
+    form_
+      [ method_ "post"
+      , action_ "/transactions/transfer"
+      , hxPost_ "/transactions/transfer"
+      , hxTarget_ "#transactions-content"
+      , hxSwap_ "outerHTML"
+      ]
+      $ do
+        select_ [name_ "transferFromAccountId"] (mapM_ accountOption (activeAccounts accounts))
+        select_ [name_ "transferToAccountId"] (mapM_ accountOption (activeAccounts accounts))
+        input_ [type_ "date", name_ "transferDate"]
+        input_ [type_ "number", step_ "0.01", min_ "0", name_ "transferAmount", placeholder_ "0.00"]
+        button_ [type_ "submit"] "Add transfer"
 
 transactionsTable :: [Account] -> [Category] -> [Transaction] -> Html ()
 transactionsTable accounts categories transactions = table_ $ do
@@ -349,24 +412,19 @@ parseAccountId t = AccountId <$> parseInt64 t
 parseCategoryId :: Text -> Maybe CategoryId
 parseCategoryId t = CategoryId <$> parseInt64 t
 
--- | One split line that's always part of the transaction (the form's
--- first line) — a category and an amount, both required.
-parseRequiredLine :: Text -> Text -> Either Text TransactionLine
-parseRequiredLine catText amtText = case parseCategoryId catText of
-  Nothing -> Left "Unknown category."
-  Just cid -> case parsePositiveEuros amtText of
-    Nothing -> Left "Invalid amount."
-    Just amt -> Right (TransactionLine cid (negateCents amt))
-
--- | A split line the user might not be using (the form's second/third
--- line): a blank amount means "skip this line" — how the spending form
--- supports an optional extra split without any client-side JS to
--- add/remove rows. A non-blank amount is validated exactly like
--- 'parseRequiredLine'.
-parseOptionalLine :: Text -> Text -> Either Text (Maybe TransactionLine)
-parseOptionalLine catText amtText
-  | Text.null (Text.strip amtText) = Right Nothing
-  | otherwise = Just <$> parseRequiredLine catText amtText
+-- | Parses every (category, amount) pair the split editor submitted,
+-- in order, short-circuiting on the first invalid one. The amount is
+-- *signed* (via 'Api.Money.parseNonZeroSignedEuros', not
+-- 'Api.Money.parsePositiveEuros'): a negative line is a refund/credit
+-- against that category — see the module header.
+parseSplitLines :: [(Text, Text)] -> Either Text [TransactionLine]
+parseSplitLines = traverse parseOneLine
+  where
+    parseOneLine (catText, amtText) = case parseCategoryId catText of
+      Nothing -> Left "Unknown category."
+      Just cid -> case parseNonZeroSignedEuros amtText of
+        Nothing -> Left "Invalid amount."
+        Just amt -> Right (TransactionLine cid (negateCents amt))
 
 parseInt64 :: Text -> Maybe Int64
 parseInt64 t = case TextRead.decimal t of
