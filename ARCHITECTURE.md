@@ -54,9 +54,11 @@ generated `Paths_bucktracker.getDataDir`, and stored once at startup as
 `serveDirectoryWebApp` — so `GET /static/pico.min.css`,
 `/static/htmx.min.js`, `/static/alpine-csp.min.js`, and our own
 `/static/app.js` all just work, including in tests (`Api.Setup`
-resolves the same `appStaticDir` the real app does). Nothing in
-`Api/Html.hs` points at `/static/*` yet — the pages themselves still
-load HTMX from a CDN — that switch is the next step.
+resolves the same `appStaticDir` the real app does). `Api.Html.page`
+links all four from `<head>` — HTMX and Alpine deferred, so they
+execute (in that order) after the DOM parses but before
+`DOMContentLoaded`. No CDN, no network dependency: Bucktracker works
+fully offline.
 
 ## Request lifecycle: clicking "Add expense"
 
@@ -72,11 +74,14 @@ Transactions page fills in the spending form and clicks submit.
    new page. No JSON, no client-side framework, no build step.
 
 2. **Servant routes it.** `src/Api/Transactions.hs` declares
-   `"transactions" :> "spending" :> ReqBody '[FormUrlEncoded]
-   NewSpendingForm :> Post '[HTML] (Html ())`. Servant matches the URL
-   and method, then decodes the raw form fields (all plain `Text`) into
-   a `NewSpendingForm` record via `FromForm` — matched by the HTML
-   `name="..."` attributes, nothing fancier.
+   `Header "HX-Request" Text :> "transactions" :> "spending" :>
+   ReqBody '[FormUrlEncoded] NewSpendingForm :> Post '[HTML] (Html ())`.
+   Servant matches the URL and method, decodes the raw form fields (all
+   plain `Text`) into a `NewSpendingForm` record via `FromForm` —
+   matched by the HTML `name="..."` attributes — and hands the handler
+   the `HX-Request` header as a `Maybe Text` (HTMX always sends
+   `HX-Request: true`; a plain browser form POST never sends it at
+   all).
 
 3. **The handler does HTTP-shaped validation.**
    `createSpendingHandler` turns the form's `Text` fields into real
@@ -98,12 +103,24 @@ Transactions page fills in the spending form and clicks submit.
    "Illegal states, unrepresentable" below), and only then runs the
    `INSERT`s into `transactions` and `transaction_lines`.
 
-5. **Success re-renders the fragment.** `renderFragment` re-reads the
-   current month's accounts/categories/transactions straight back out
-   of `Db.*` and builds the updated `#transactions-content` `Html ()`
-   value with ordinary Lucid combinators (`table_`, `tr_`, `td_`, …) —
-   there's no diffing or templating language, it's just Haskell
-   building a tree of HTML.
+5. **Success re-renders, fragment or full page.** `renderFragment`
+   re-reads the current month's accounts/categories/transactions
+   straight back out of `Db.*` and builds the updated
+   `#transactions-content` `Html ()` value with ordinary Lucid
+   combinators (`table_`, `tr_`, `td_`, …) — there's no diffing or
+   templating language, it's just Haskell building a tree of HTML. It
+   then hands that, and the `HX-Request` header from step 2, to
+   `Api.Html.pageOrFragment`: an HTMX request gets just that `Html ()`
+   value back; a plain browser request (HTMX didn't load, is blocked,
+   or JS is off) gets it wrapped in a full `Api.Html.page` instead —
+   the progressive-enhancement fallback, since every `<form>` also
+   carries a real `method="post" action="..."` pair, so a plain
+   submission is a genuine page navigation, not a dead click. This one
+   function is also what fixed a real bug: earlier, `Api.Transactions`
+   and `Api.Budget` wrapped *every* response in `page` unconditionally,
+   so HTMX kept swapping a full document — `<head>`, `<nav>`, scripts
+   and all — into `#transactions-content`/`#budget-content`, nesting a
+   new copy of the page inside itself on every single click.
 
 6. **Servant serializes it, HTMX swaps it in.** `servant-lucid`'s
    `MimeRender` instance turns that `Html ()` into the HTTP response
@@ -112,9 +129,9 @@ Transactions page fills in the spending form and clicks submit.
 
 Every other page (`Api.Accounts`, `Api.Categories`, `Api.Budget`) is
 the exact same shape: parse the form → ask `Domain`/`Db` to do the real
-work → re-render the same fragment on success *or* on a validation
-error (so the error banner and the unchanged table render together,
-not a separate error page).
+work → re-render through `pageOrFragment` on success *or* on a
+validation error (so the error banner and the unchanged table render
+together, not a separate error page).
 
 ## Illegal states, unrepresentable
 

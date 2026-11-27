@@ -32,7 +32,7 @@ import Lucid
 import Servant
 import Servant.HTML.Lucid (HTML)
 
-import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, page)
+import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment)
 import Api.Monad (AppM, withConn)
 import qualified Db.Account as Db
 import qualified Db.Category as Db
@@ -62,10 +62,10 @@ import Web.FormUrlEncoded (FromForm)
 
 type TransactionsApi =
   "transactions" :> Get '[HTML] (Html ())
-    :<|> "transactions" :> "inflow" :> ReqBody '[FormUrlEncoded] NewInflowForm :> Post '[HTML] (Html ())
-    :<|> "transactions" :> "spending" :> ReqBody '[FormUrlEncoded] NewSpendingForm :> Post '[HTML] (Html ())
-    :<|> "transactions" :> "transfer" :> ReqBody '[FormUrlEncoded] NewTransferForm :> Post '[HTML] (Html ())
-    :<|> "transactions" :> Capture "id" Int64 :> "clear" :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "transactions" :> "inflow" :> ReqBody '[FormUrlEncoded] NewInflowForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "transactions" :> "spending" :> ReqBody '[FormUrlEncoded] NewSpendingForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "transactions" :> "transfer" :> ReqBody '[FormUrlEncoded] NewTransferForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "transactions" :> Capture "id" Int64 :> "clear" :> Post '[HTML] (Html ())
 
 -- | Each form's fields are prefixed so the three forms on one page
 -- never collide on a shared @name@ attribute (they share the page, not
@@ -111,102 +111,104 @@ transactionsServer =
     :<|> toggleClearedHandler
 
 listTransactionsHandler :: AppM (Html ())
-listTransactionsHandler = renderFragment Nothing
+listTransactionsHandler = renderFragment Nothing Nothing
 
-createInflowHandler :: NewInflowForm -> AppM (Html ())
-createInflowHandler form = case parseAccountId (inflowAccountId form) of
-  Nothing -> withError "Unknown account."
+createInflowHandler :: Maybe Text -> NewInflowForm -> AppM (Html ())
+createInflowHandler hx form = case parseAccountId (inflowAccountId form) of
+  Nothing -> withError hx "Unknown account."
   Just aid -> case parseIsoDate (inflowDate form) of
-    Nothing -> withError "Invalid date."
+    Nothing -> withError hx "Invalid date."
     Just day -> case parseEuros (inflowAmount form) of
-      Nothing -> withError "Invalid amount."
+      Nothing -> withError hx "Invalid amount."
       Just amt -> do
         accounts <- withConn Db.listAccounts
         if not (any ((== aid) . accId) accounts)
-          then withError "Unknown account."
+          then withError hx "Unknown account."
           else do
             _ <- withConn (\conn -> Db.insertInflow conn aid day (inflowPayee form) defaultStatus amt Nothing)
-            renderFragment Nothing
+            renderFragment hx Nothing
 
-createSpendingHandler :: NewSpendingForm -> AppM (Html ())
-createSpendingHandler form = case parseAccountId (spendingAccountId form) of
-  Nothing -> withError "Unknown account."
+createSpendingHandler :: Maybe Text -> NewSpendingForm -> AppM (Html ())
+createSpendingHandler hx form = case parseAccountId (spendingAccountId form) of
+  Nothing -> withError hx "Unknown account."
   Just aid -> case parseIsoDate (spendingDate form) of
-    Nothing -> withError "Invalid date."
+    Nothing -> withError hx "Invalid date."
     Just day -> case parseRequiredLine (spendingCategoryId1 form) (spendingAmount1 form) of
-      Left err -> withError err
+      Left err -> withError hx err
       Right line1 -> case parseOptionalLine (spendingCategoryId2 form) (spendingAmount2 form) of
-        Left err -> withError err
+        Left err -> withError hx err
         Right maybeLine2 -> case parseOptionalLine (spendingCategoryId3 form) (spendingAmount3 form) of
-          Left err -> withError err
+          Left err -> withError hx err
           Right maybeLine3 -> do
             let lines' = line1 :| catMaybes [maybeLine2, maybeLine3]
             accounts <- withConn Db.listAccounts
             categories <- withConn Db.listCategories
             if not (any ((== aid) . accId) accounts)
-              then withError "Unknown account."
+              then withError hx "Unknown account."
               else
                 if not (all (\l -> any ((== tlCategory l) . catId) categories) (toList lines'))
-                  then withError "Unknown category."
+                  then withError hx "Unknown category."
                   else do
                     result <-
                       withConn
                         (\conn -> Db.insertSpending conn aid day (spendingPayee form) defaultStatus lines' Nothing)
                     case result of
                       Left CategorizedTransactionRequiresOnBudgetAccount ->
-                        withError "Categorized transactions are not allowed on tracking accounts."
-                      Left _ -> withError "Could not create transaction."
-                      Right _ -> renderFragment Nothing
+                        withError hx "Categorized transactions are not allowed on tracking accounts."
+                      Left _ -> withError hx "Could not create transaction."
+                      Right _ -> renderFragment hx Nothing
 
-createTransferHandler :: NewTransferForm -> AppM (Html ())
-createTransferHandler form = case parseAccountId (transferFromAccountId form) of
-  Nothing -> withError "Unknown account."
+createTransferHandler :: Maybe Text -> NewTransferForm -> AppM (Html ())
+createTransferHandler hx form = case parseAccountId (transferFromAccountId form) of
+  Nothing -> withError hx "Unknown account."
   Just fromAid -> case parseAccountId (transferToAccountId form) of
-    Nothing -> withError "Unknown account."
+    Nothing -> withError hx "Unknown account."
     Just toAid -> case parseIsoDate (transferDate form) of
-      Nothing -> withError "Invalid date."
+      Nothing -> withError hx "Invalid date."
       Just day -> case parseEuros (transferAmount form) of
-        Nothing -> withError "Invalid amount."
+        Nothing -> withError hx "Invalid amount."
         Just amt -> do
           accounts <- withConn Db.listAccounts
           if not (all (`elem` map accId accounts) [fromAid, toAid])
-            then withError "Unknown account."
+            then withError hx "Unknown account."
             else do
               result <- withConn (\conn -> Db.insertTransfer conn (fromAid, toAid) day defaultStatus amt)
               case result of
-                Left TransferRequiresDistinctAccounts -> withError "A transfer needs two different accounts."
+                Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
                 Left TransferRequiresMatchingBudgetStatus ->
-                  withError "Cannot transfer between an on-budget and a tracking account."
-                Left _ -> withError "Could not create transfer."
-                Right _ -> renderFragment Nothing
+                  withError hx "Cannot transfer between an on-budget and a tracking account."
+                Left _ -> withError hx "Could not create transfer."
+                Right _ -> renderFragment hx Nothing
 
 -- | Toggles one transaction between Uncleared and Cleared from the
 -- register — the first step of reconciling (the second, account-wide
 -- step lives on the Accounts page, see Api.Accounts). A no-op on an
 -- unknown id or an already-Reconciled transaction
 -- (Domain.Types.toggleCleared).
-toggleClearedHandler :: Int64 -> AppM (Html ())
-toggleClearedHandler rawId = do
+toggleClearedHandler :: Maybe Text -> Int64 -> AppM (Html ())
+toggleClearedHandler hx rawId = do
   withConn (\conn -> Db.setTransactionCleared conn (TransactionId rawId))
-  renderFragment Nothing
+  renderFragment hx Nothing
 
 defaultStatus :: TransactionStatus
 defaultStatus = Uncleared
 
-withError :: Text -> AppM (Html ())
-withError msg = renderFragment (Just msg)
+withError :: Maybe Text -> Text -> AppM (Html ())
+withError hx msg = renderFragment hx (Just msg)
 
--- | Every mutating handler renders back exactly this fragment: HTMX
--- swaps @#transactions-content@ (hx-swap="outerHTML"), so the page
--- updates without a full navigation.
-renderFragment :: Maybe Text -> AppM (Html ())
-renderFragment err = do
+-- | Every mutating handler renders back through this. A plain
+-- (non-HTMX) request gets a full page back — the progressive-
+-- enhancement fallback for when HTMX didn't load — an HTMX request
+-- gets just the @#transactions-content@ fragment it's about to swap in
+-- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'.
+renderFragment :: Maybe Text -> Maybe Text -> AppM (Html ())
+renderFragment hx err = do
   today <- liftIO getCurrentTime
   let ym = dayToYearMonth (utctDay today)
   transactions <- withConn (\conn -> Db.listTransactionsInMonth conn ym)
   accounts <- withConn Db.listAccounts
   categories <- withConn Db.listCategories
-  pure (page "Transactions" (transactionsContent err accounts categories transactions))
+  pure (pageOrFragment hx "Transactions" (transactionsContent err accounts categories transactions))
 
 transactionsContent :: Maybe Text -> [Account] -> [Category] -> [Transaction] -> Html ()
 transactionsContent err accounts categories transactions = div_ [id_ "transactions-content"] $ do
@@ -234,23 +236,37 @@ categoryOption cat = option_ [value_ (idText (catId cat))] (toHtml (catName cat)
 
 newInflowForm :: [Account] -> Html ()
 newInflowForm accounts =
-  form_ [hxPost_ "/transactions/inflow", hxTarget_ "#transactions-content", hxSwap_ "outerHTML"] $ do
-    select_ [name_ "inflowAccountId"] (mapM_ accountOption (activeAccounts accounts))
-    input_ [type_ "date", name_ "inflowDate"]
-    input_ [type_ "text", name_ "inflowPayee", placeholder_ "Payee"]
-    input_ [type_ "number", step_ "0.01", min_ "0", name_ "inflowAmount", placeholder_ "0.00"]
-    button_ [type_ "submit"] "Add inflow"
+  form_
+    [ method_ "post"
+    , action_ "/transactions/inflow"
+    , hxPost_ "/transactions/inflow"
+    , hxTarget_ "#transactions-content"
+    , hxSwap_ "outerHTML"
+    ]
+    $ do
+      select_ [name_ "inflowAccountId"] (mapM_ accountOption (activeAccounts accounts))
+      input_ [type_ "date", name_ "inflowDate"]
+      input_ [type_ "text", name_ "inflowPayee", placeholder_ "Payee"]
+      input_ [type_ "number", step_ "0.01", min_ "0", name_ "inflowAmount", placeholder_ "0.00"]
+      button_ [type_ "submit"] "Add inflow"
 
 newSpendingForm :: [Account] -> [Category] -> Html ()
 newSpendingForm accounts categories =
-  form_ [hxPost_ "/transactions/spending", hxTarget_ "#transactions-content", hxSwap_ "outerHTML"] $ do
-    select_ [name_ "spendingAccountId"] (mapM_ accountOption (activeAccounts accounts))
-    input_ [type_ "date", name_ "spendingDate"]
-    input_ [type_ "text", name_ "spendingPayee", placeholder_ "Payee"]
-    splitLine "spendingCategoryId1" "spendingAmount1" "0.00" categories
-    splitLine "spendingCategoryId2" "spendingAmount2" "0.00 (optional)" categories
-    splitLine "spendingCategoryId3" "spendingAmount3" "0.00 (optional)" categories
-    button_ [type_ "submit"] "Add expense"
+  form_
+    [ method_ "post"
+    , action_ "/transactions/spending"
+    , hxPost_ "/transactions/spending"
+    , hxTarget_ "#transactions-content"
+    , hxSwap_ "outerHTML"
+    ]
+    $ do
+      select_ [name_ "spendingAccountId"] (mapM_ accountOption (activeAccounts accounts))
+      input_ [type_ "date", name_ "spendingDate"]
+      input_ [type_ "text", name_ "spendingPayee", placeholder_ "Payee"]
+      splitLine "spendingCategoryId1" "spendingAmount1" "0.00" categories
+      splitLine "spendingCategoryId2" "spendingAmount2" "0.00 (optional)" categories
+      splitLine "spendingCategoryId3" "spendingAmount3" "0.00 (optional)" categories
+      button_ [type_ "submit"] "Add expense"
 
 -- | One split line: a category picker plus an amount. Leaving the
 -- amount blank on an optional line (see 'parseOptionalLine') is how a
@@ -263,12 +279,19 @@ splitLine categoryFieldName amountFieldName amountPlaceholder categories = do
 
 newTransferForm :: [Account] -> Html ()
 newTransferForm accounts =
-  form_ [hxPost_ "/transactions/transfer", hxTarget_ "#transactions-content", hxSwap_ "outerHTML"] $ do
-    select_ [name_ "transferFromAccountId"] (mapM_ accountOption (activeAccounts accounts))
-    select_ [name_ "transferToAccountId"] (mapM_ accountOption (activeAccounts accounts))
-    input_ [type_ "date", name_ "transferDate"]
-    input_ [type_ "number", step_ "0.01", min_ "0", name_ "transferAmount", placeholder_ "0.00"]
-    button_ [type_ "submit"] "Add transfer"
+  form_
+    [ method_ "post"
+    , action_ "/transactions/transfer"
+    , hxPost_ "/transactions/transfer"
+    , hxTarget_ "#transactions-content"
+    , hxSwap_ "outerHTML"
+    ]
+    $ do
+      select_ [name_ "transferFromAccountId"] (mapM_ accountOption (activeAccounts accounts))
+      select_ [name_ "transferToAccountId"] (mapM_ accountOption (activeAccounts accounts))
+      input_ [type_ "date", name_ "transferDate"]
+      input_ [type_ "number", step_ "0.01", min_ "0", name_ "transferAmount", placeholder_ "0.00"]
+      button_ [type_ "submit"] "Add transfer"
 
 transactionsTable :: [Account] -> [Category] -> [Transaction] -> Html ()
 transactionsTable accounts categories transactions = table_ $ do
@@ -280,7 +303,7 @@ transactionRow accounts categories tx = tr_ $ do
   td_ (toHtml (Text.pack (show (txDate tx))))
   td_ (toHtml (txPayee tx))
   td_ (toHtml (categorizationText accounts categories (txCategorization tx)))
-  td_ (toHtml (centsToEuroText (transactionAmount tx)))
+  td_ [class_ "amount"] (toHtml (centsToEuroText (transactionAmount tx)))
   td_ (toHtml (transactionStatusToText (txStatus tx)))
   td_ (clearButton tx)
 
@@ -293,12 +316,11 @@ clearButton :: Transaction -> Html ()
 clearButton tx
   | txStatus tx == Reconciled = mempty
   | otherwise =
-      button_
-        [ hxPost_ ("/transactions/" <> transactionIdText (txId tx) <> "/clear")
-        , hxTarget_ "#transactions-content"
-        , hxSwap_ "outerHTML"
-        ]
-        (if txStatus tx == Uncleared then "Clear" else "Unclear")
+      let routePath = "/transactions/" <> transactionIdText (txId tx) <> "/clear"
+      in form_ [method_ "post", action_ routePath] $
+           button_
+             [type_ "submit", hxPost_ routePath, hxTarget_ "#transactions-content", hxSwap_ "outerHTML"]
+             (if txStatus tx == Uncleared then "Clear" else "Unclear")
 
 transactionIdText :: TransactionId -> Text
 transactionIdText (TransactionId i) = Text.pack (show i)

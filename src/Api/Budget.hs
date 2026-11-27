@@ -25,7 +25,7 @@ import Lucid
 import Servant
 import Servant.HTML.Lucid (HTML)
 
-import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, page)
+import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment)
 import Api.Monad (AppM, withConn)
 import qualified Db.Account as Db
 import qualified Db.Assignment as Db
@@ -58,7 +58,7 @@ import Web.FormUrlEncoded (FromForm)
 
 type BudgetApi =
   "budget" :> Get '[HTML] (Html ())
-    :<|> "budget" :> "assign" :> ReqBody '[FormUrlEncoded] NewAssignmentForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "budget" :> "assign" :> ReqBody '[FormUrlEncoded] NewAssignmentForm :> Post '[HTML] (Html ())
 
 -- | Field names must match the @name@ attributes of 'newAssignmentForm'
 -- below — 'FromForm' parses by field name.
@@ -73,30 +73,32 @@ budgetServer :: ServerT BudgetApi AppM
 budgetServer = listBudgetHandler :<|> assignHandler
 
 listBudgetHandler :: AppM (Html ())
-listBudgetHandler = renderFragment Nothing
+listBudgetHandler = renderFragment Nothing Nothing
 
-assignHandler :: NewAssignmentForm -> AppM (Html ())
-assignHandler form = case parseCategoryId (assignCategoryId form) of
-  Nothing -> withError "Unknown category."
+assignHandler :: Maybe Text -> NewAssignmentForm -> AppM (Html ())
+assignHandler hx form = case parseCategoryId (assignCategoryId form) of
+  Nothing -> withError hx "Unknown category."
   Just cid -> case parseEuros (assignAmount form) of
-    Nothing -> withError "Invalid amount."
+    Nothing -> withError hx "Invalid amount."
     Just amt -> do
       categories <- withConn Db.listCategories
       if not (any ((== cid) . catId) categories)
-        then withError "Unknown category."
+        then withError hx "Unknown category."
         else do
           ym <- currentYearMonth
           withConn (\conn -> Db.setAssignment conn cid ym amt)
-          renderFragment Nothing
+          renderFragment hx Nothing
 
-withError :: Text -> AppM (Html ())
-withError msg = renderFragment (Just msg)
+withError :: Maybe Text -> Text -> AppM (Html ())
+withError hx msg = renderFragment hx (Just msg)
 
--- | Every mutating handler renders back exactly this fragment: HTMX
--- swaps @#budget-content@ (hx-swap="outerHTML"), so the page updates
--- without a full navigation.
-renderFragment :: Maybe Text -> AppM (Html ())
-renderFragment err = do
+-- | Every mutating handler renders back through this. A plain
+-- (non-HTMX) request gets a full page back — the progressive-
+-- enhancement fallback for when HTMX didn't load — an HTMX request
+-- gets just the @#budget-content@ fragment it's about to swap in
+-- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'.
+renderFragment :: Maybe Text -> Maybe Text -> AppM (Html ())
+renderFragment hx err = do
   ym <- currentYearMonth
   accounts <- withConn Db.listAccounts
   groups <- withConn Db.listCategoryGroups
@@ -107,7 +109,12 @@ renderFragment err = do
       months = monthsThrough ym assignments txs
       budgets = rolloverMonths accounts categoryIds months assignments txs
       currentBudget = currentMonthBudget ym budgets
-  pure (page "Budget" (budgetContent err groups categories (mbCategoryMonths currentBudget) (mbReadyToAssign currentBudget)))
+  pure
+    ( pageOrFragment
+        hx
+        "Budget"
+        (budgetContent err groups categories (mbCategoryMonths currentBudget) (mbReadyToAssign currentBudget))
+    )
 
 currentYearMonth :: AppM YearMonth
 currentYearMonth = dayToYearMonth . utctDay <$> liftIO getCurrentTime
@@ -147,10 +154,12 @@ readyToAssignBanner rta = p_ (toHtml ("Ready to Assign: " <> centsToEuroText rta
 
 newAssignmentForm :: [Category] -> Html ()
 newAssignmentForm categories =
-  form_ [hxPost_ "/budget/assign", hxTarget_ "#budget-content", hxSwap_ "outerHTML"] $ do
-    select_ [name_ "assignCategoryId"] (mapM_ categoryOption (activeCategories categories))
-    input_ [type_ "number", step_ "0.01", min_ "0", name_ "assignAmount", placeholder_ "0.00"]
-    button_ [type_ "submit"] "Assign"
+  form_
+    [method_ "post", action_ "/budget/assign", hxPost_ "/budget/assign", hxTarget_ "#budget-content", hxSwap_ "outerHTML"]
+    $ do
+      select_ [name_ "assignCategoryId"] (mapM_ categoryOption (activeCategories categories))
+      input_ [type_ "number", step_ "0.01", min_ "0", name_ "assignAmount", placeholder_ "0.00"]
+      button_ [type_ "submit"] "Assign"
 
 activeCategories :: [Category] -> [Category]
 activeCategories = filter (not . isArchivedCategory)
@@ -167,9 +176,9 @@ categoryMonthRow :: [CategoryGroup] -> [Category] -> CategoryMonth -> Html ()
 categoryMonthRow groups categories cm = tr_ $ do
   td_ (toHtml (categoryNameFor categories (cmCategory cm)))
   td_ (toHtml (groupNameFor groups categories (cmCategory cm)))
-  td_ (toHtml (centsToEuroText (cmAssigned cm)))
-  td_ (toHtml (centsToEuroText (cmActivity cm)))
-  td_ (toHtml (centsToEuroText (available cm)))
+  td_ [class_ "amount"] (toHtml (centsToEuroText (cmAssigned cm)))
+  td_ [class_ "amount"] (toHtml (centsToEuroText (cmActivity cm)))
+  td_ [class_ "amount"] (toHtml (centsToEuroText (available cm)))
 
 categoryNameFor :: [Category] -> CategoryId -> Text
 categoryNameFor categories cid = case filter ((== cid) . catId) categories of

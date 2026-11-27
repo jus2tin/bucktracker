@@ -1,7 +1,8 @@
 module Api.AccountsSpec (spec) where
 
-import Api.Setup (withTestApp)
+import Api.Setup (postHtmlFormHx, withTestApp)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
+import Data.Char (toLower)
 import Data.List (isInfixOf)
 import Data.Time (getCurrentTime, showGregorian, utctDay)
 import Network.HTTP.Types (hLocation)
@@ -16,9 +17,27 @@ spec = with withTestApp $ do
       response <- get "/"
       liftIO (response `shouldSatisfy` ((== Just "/budget") . lookup hLocation . simpleHeaders))
 
-  describe "GET /accounts" $
+  describe "GET /accounts" $ do
     it "shows an empty table as long as there are no accounts" $
       get "/accounts" `shouldRespondWith` 200
+
+    it "is a full page linking the vendored static assets" $ do
+      response <- get "/accounts"
+      liftIO (bodyContains "/static/pico.min.css" response `shouldBe` True)
+      liftIO (bodyContains "/static/htmx.min.js" response `shouldBe` True)
+      liftIO (bodyContainsCI "<!doctype html" response `shouldBe` True)
+
+  describe "fragment vs. full page (S-1 fix)" $ do
+    it "a plain (non-HTMX) POST gets a full page back, not a bare fragment" $ do
+      response <- postHtmlForm "/accounts" [("name", "Checking Account"), ("accountType", "checking")]
+      liftIO (bodyContainsCI "<!doctype html" response `shouldBe` True)
+      liftIO (bodyContains "<nav" response `shouldBe` True)
+
+    it "an HTMX POST (HX-Request: true) gets just the #accounts-content fragment" $ do
+      response <- postHtmlFormHx "/accounts" [("name", "Checking Account"), ("accountType", "checking")]
+      liftIO (bodyContainsCI "<!doctype html" response `shouldBe` False)
+      liftIO (bodyContains "<nav" response `shouldBe` False)
+      liftIO (bodyContains "Checking Account" response `shouldBe` True)
 
   describe "POST /accounts" $ do
     it "creates an account and shows it in the table" $ do
@@ -84,3 +103,8 @@ spec = with withTestApp $ do
 
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody
+
+-- | Case-insensitive: Lucid's exact casing for the doctype declaration
+-- isn't a contract worth pinning a test to.
+bodyContainsCI :: String -> SResponse -> Bool
+bodyContainsCI needle = (map toLower needle `isInfixOf`) . map toLower . BSL8.unpack . simpleBody
