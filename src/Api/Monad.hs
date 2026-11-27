@@ -17,8 +17,14 @@ import Database.SQLite.Simple (Connection)
 import qualified Db.Pool as Pool
 import Servant (Handler, ServerError)
 
-newtype AppEnv = AppEnv
-  { appPool :: Pool Connection
+data AppEnv = AppEnv
+  { appPool      :: Pool Connection
+  , appStaticDir :: FilePath
+    -- ^ Where the vendored, pinned static assets (Pico CSS, HTMX,
+    -- Alpine.js, @app.js@) live on disk — resolved once at startup via
+    -- @Paths_bucktracker.getDataDir@, the same mechanism already used
+    -- for @migrations/@ (DECISIONS.md §7/§12). Served by 'Api.application'
+    -- at @\/static\/*@.
   }
 
 newtype AppM a = AppM (ReaderT AppEnv Handler a)

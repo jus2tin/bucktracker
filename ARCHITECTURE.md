@@ -41,6 +41,23 @@ There's a fourth, much smaller piece: `app/Main.hs` wires up config,
 opens the connection pool, and starts the Warp web server. It's the
 only place that "boots" anything.
 
+## Static assets
+
+Pico CSS, HTMX, and Alpine.js (the `@alpinejs/csp` build) are vendored,
+pinned, minified files checked into `static/` — never fetched from a
+CDN, never run through a bundler. They're installed via Cabal
+`data-files` (`package.yaml`, the exact mechanism `migrations/*.sql`
+already used — see `DECISIONS.md` §7/§12), located at runtime via the
+generated `Paths_bucktracker.getDataDir`, and stored once at startup as
+`appStaticDir` on `AppEnv` (`src/Api/Monad.hs`). `Api.hs` mounts
+`"static" :> Raw`, served by `servant-server`'s own
+`serveDirectoryWebApp` — so `GET /static/pico.min.css`,
+`/static/htmx.min.js`, `/static/alpine-csp.min.js`, and our own
+`/static/app.js` all just work, including in tests (`Api.Setup`
+resolves the same `appStaticDir` the real app does). Nothing in
+`Api/Html.hs` points at `/static/*` yet — the pages themselves still
+load HTMX from a CDN — that switch is the next step.
+
 ## Request lifecycle: clicking "Add expense"
 
 Concretely, here's everything that happens when someone on the
@@ -278,6 +295,7 @@ yourself.
 | Change what happens at month rollover (e.g. partial carry, a cap) | `src/Domain/Budget.hs` (`rolloverCategoryMonth`, `rolloverMonths`); `test/Domain/BudgetSpec.hs` (the QuickCheck properties — change the law, change the test); `DECISIONS.md` §3/§5 (the invariant is written down there — keep it honest) |
 | Add a brand-new page/route (e.g. a Reports page) | New `src/Api/<Name>.hs`, same shape as `src/Api/Budget.hs` (routes type + handlers + a `render*`/`*Content` function); wire it into `RootApi`/`server` in `src/Api.hs`; add the nav link in `src/Api/Html.hs`; new `test/Api/<Name>Spec.hs` |
 | Add a new database table | New numbered file in `migrations/`; a new `src/Db/<Name>.hs` module (queries + a `FromRow` instance, following `src/Db/Assignment.hs` as the smallest example); update **this file** in the same commit (see the Documentation Standard in `CLAUDE.md`) |
+| Add or update a vendored static asset (CSS/JS) | Drop the file in `static/`; it's already covered by the `static/*.css`/`static/*.js` globs in `package.yaml`'s `data-files` — no other wiring needed, it's served automatically at `/static/<filename>` |
 | Add a scheduled/recurring transaction or forecast rule (v0.2, see `DECISIONS.md` §10) | New `migrations/*_scheduled_items.sql`; a new, **pure** `src/Domain/Projection.hs` (no `IO`, reuses `rolloverCategoryMonth`/`available` — never edits them); a new `src/Db/ScheduledItem.hs`; a new `src/Api/Forecast.hs` mounted at `/forecast`. Critically: **never** make `Domain.Transaction`/`Domain.Budget`'s existing functions aware of "future" data — the real ledger stays strictly historical; a forecast is a read-only simulation layered on top, never a write to `transactions` |
 | Change a validation rule (e.g. a name's max length) | `src/Domain/Validation.hs` (`nonEmptyName`) |
 | Add a new kind of domain error | `src/Domain/Error.hs` (`DomainError`); whichever `Domain`/`Db` function should raise it; the `Api` handler's `case result of Left ... -> ...` that turns it into an on-page message |

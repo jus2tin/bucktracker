@@ -22,6 +22,10 @@ extra-source-files:
     CHANGELOG.md
 data-files:
     migrations/0001_initial.sql
+    static/pico.min.css
+    static/alpine-csp.min.js
+    static/app.js
+    static/htmx.min.js
 
 source-repository head
   type: git
@@ -111,6 +115,7 @@ executable bucktracker-exe
   build-depends:
       base >=4.7 && <5
     , bucktracker
+    , filepath
     , text
     , time
     , warp
@@ -124,6 +129,7 @@ test-suite bucktracker-test
       Api.BudgetSpec
       Api.CategoriesSpec
       Api.Setup
+      Api.StaticSpec
       Api.TransactionsSpec
       Db.AccountSpec
       Db.AssignmentSpec

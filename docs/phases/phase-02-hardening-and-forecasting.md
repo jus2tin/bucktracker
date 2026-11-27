@@ -29,15 +29,15 @@
 
 **Goal:** Establish the zero-build static asset pipeline (`Pico CSS` + `HTMX` + `Alpine.js`) at the very start so every subsequent fix and workflow (inline budget editing, dynamic N-way split editor, live reconciliation math, modals/shortcuts, transaction CRUD, month navigation) is built once on clean semantic HTML rather than rewritten twice.
 
-### Step 1 — Servant Static-Asset Route (`/static/*`) & Vendored Frontend Libraries (`DECISIONS.md` §12, `H-5`)
-- [ ] **Vendor assets in `static/`:** Add pinned, minified, zero-build files to `static/`:
-  - `static/pico.min.css` (Pico CSS v2 semantic stylesheet — typography, tables, forms, `<dialog>`, responsive `.container`, automatic light/dark mode).
-  - `static/htmx.min.js` (HTMX 2.0.3 — replaces the `unpkg.com` CDN `<script>` tag so Bucktracker works **100% offline**).
-  - `static/alpine-csp.min.js` (or `static/alpine.min.js` — see `DECISIONS.md` §12 CSP note; prefer `@alpinejs/csp` + `static/app.js` registering `Alpine.data(...)` helpers so Step 7's `Content-Security-Policy` can keep strict `script-src 'self'` without `'unsafe-eval'`).
-  - `static/app.js` — tiny, plain ES6 file holding integer-cent preview helpers (`parseEuroCents`, `formatEuroCents`) and Alpine component definitions (`splitEditor`, `reconcileCalc`, `inlineAssign`, global keyboard shortcuts).
-- [ ] **Wire Cabal `data-files` & `AppEnv`:** Add `static/*.css` and `static/*.js` under `data-files:` in `package.yaml` (mirroring `migrations/*.sql`). Resolve `staticDir <- (</> "static") <$> Paths_bucktracker.getDataDir` on startup (`Main.hs` + `Api.Setup`) and store `appStaticDir :: FilePath` on `AppEnv` (`src/Api/Monad.hs`).
-- [ ] **Mount `"static" :> Raw` in `src/Api.hs`:** Serve `appStaticDir` via `Servant.Server.StaticFiles.serveDirectoryWebApp` (built into `servant-server`, zero new dependencies). Ensure `<script defer src="/static/...">` ordering loads `app.js` / `alpine` cleanly alongside `htmx.min.js` (and re-initializes cleanly after HTMX fragment swaps).
-- [ ] **Tests & Docs:** Verify `GET /static/pico.min.css`, `GET /static/htmx.min.js`, and `GET /static/app.js` return `200 OK` with expected `Content-Type` headers in `test/Api/`, and document `/static/*` in `ARCHITECTURE.md`.
+### Step 1 — Servant Static-Asset Route (`/static/*`) & Vendored Frontend Libraries (`DECISIONS.md` §12, `H-5`) ✅ Done
+- [x] **Vendor assets in `static/`:** Add pinned, minified, zero-build files to `static/`:
+  - `static/pico.min.css` (Pico CSS **v2.1.1** semantic stylesheet — typography, tables, forms, `<dialog>`, responsive `.container`, automatic light/dark mode).
+  - `static/htmx.min.js` (HTMX **2.0.3** — replaces the `unpkg.com` CDN `<script>` tag so Bucktracker works **100% offline**).
+  - `static/alpine-csp.min.js` (Alpine.js **`@alpinejs/csp` 3.17.5** — the CSP-safe build per `DECISIONS.md` §12).
+  - `static/app.js` — present but deliberately a placeholder for now; the integer-cent preview helpers and Alpine component definitions land in Steps 3–4.
+- [x] **Wire Cabal `data-files` & `AppEnv`:** `static/*.css`/`static/*.js` added to `data-files:` in `package.yaml`; `appStaticDir :: FilePath` added to `AppEnv` (`src/Api/Monad.hs`), resolved via `Paths_bucktracker.getDataDir` in both `app/Main.hs` and `test/Api/Setup.hs`.
+- [x] **Mount `"static" :> Raw` in `src/Api.hs`:** Served via `serveDirectoryWebApp`. (The `<script defer src="/static/...">` tags themselves are **not** added yet — pages still load HTMX from the CDN; wiring `Api.Html.page` to the new assets is Step 2's job, see `ARCHITECTURE.md` "Static assets".)
+- [x] **Tests & Docs:** `test/Api/StaticSpec.hs` (new) verifies `GET /static/pico.min.css`, `/static/htmx.min.js`, `/static/alpine-csp.min.js`, and `/static/app.js` return `200` with the right content-type family, and that an unknown asset 404s. `ARCHITECTURE.md` documents `/static/*` (new "Static assets" section + a "Where do I change X?" row).
 
 ### Step 2 — Semantic Pico CSS Layout, HTMX Fragment Fix & Progressive Form Fallbacks (`S-1`, `H-5`)
 - [ ] **Adopt semantic Pico markup (`src/Api/Html.hs`):**
