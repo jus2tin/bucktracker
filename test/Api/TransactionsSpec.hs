@@ -56,47 +56,45 @@ spec = with withTestApp $ do
       _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
       _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
       day <- liftIO today
+      response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "12.34")
+      liftIO (bodyContains "Supermarket" response `shouldBe` True)
+      liftIO (bodyContains "Groceries" response `shouldBe` True)
+      liftIO (bodyContains "-12.34" response `shouldBe` True)
+
+    it "splits an expense across two categories, both shown and summing to the total" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Household"), ("groupId", "1")]
+      day <- liftIO today
       response <-
         postHtmlForm
           "/transactions/spending"
           [ ("spendingAccountId", "1")
-          , ("spendingCategoryId", "1")
           , ("spendingDate", day)
           , ("spendingPayee", "Supermarket")
-          , ("spendingAmount", "12.34")
+          , ("spendingCategoryId1", "1")
+          , ("spendingAmount1", "40.00")
+          , ("spendingCategoryId2", "2")
+          , ("spendingAmount2", "24.30")
+          , ("spendingCategoryId3", "")
+          , ("spendingAmount3", "")
           ]
-      liftIO (bodyContains "Supermarket" response `shouldBe` True)
-      liftIO (bodyContains "Groceries" response `shouldBe` True)
-      liftIO (bodyContains "-12.34" response `shouldBe` True)
+      liftIO (bodyContains "Groceries, Household" response `shouldBe` True)
+      liftIO (bodyContains "-64.30" response `shouldBe` True) -- 40.00 + 24.30, derived, not stored separately
 
     it "rejects a categorized expense on a tracking account" $ do
       _ <- postHtmlForm "/accounts" [("name", "Investments"), ("accountType", "tracking")]
       _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
       _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
       day <- liftIO today
-      response <-
-        postHtmlForm
-          "/transactions/spending"
-          [ ("spendingAccountId", "1")
-          , ("spendingCategoryId", "1")
-          , ("spendingDate", day)
-          , ("spendingPayee", "Supermarket")
-          , ("spendingAmount", "12.34")
-          ]
+      response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "12.34")
       liftIO (bodyContains "not allowed on tracking accounts" response `shouldBe` True)
 
     it "rejects an unknown category with an error message, without adding a row" $ do
       _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
       day <- liftIO today
-      response <-
-        postHtmlForm
-          "/transactions/spending"
-          [ ("spendingAccountId", "1")
-          , ("spendingCategoryId", "999")
-          , ("spendingDate", day)
-          , ("spendingPayee", "Supermarket")
-          , ("spendingAmount", "12.34")
-          ]
+      response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "999" "12.34")
       liftIO (bodyContains "Unknown category" response `shouldBe` True)
 
   describe "POST /transactions/transfer" $ do
@@ -148,6 +146,22 @@ spec = with withTestApp $ do
 
       afterSecondToggle <- postHtmlForm "/transactions/1/clear" []
       liftIO (bodyContains "uncleared" afterSecondToggle `shouldBe` True)
+
+-- | A spending form post with only the first (required) split line
+-- filled in — lines 2/3 blank, as they'd be if a user never touched
+-- them (see Api.Transactions.parseOptionalLine).
+singleLineSpending :: String -> String -> String -> String -> [(String, String)]
+singleLineSpending day accountId categoryId amount =
+  [ ("spendingAccountId", accountId)
+  , ("spendingDate", day)
+  , ("spendingPayee", "Supermarket")
+  , ("spendingCategoryId1", categoryId)
+  , ("spendingAmount1", amount)
+  , ("spendingCategoryId2", "")
+  , ("spendingAmount2", "")
+  , ("spendingCategoryId3", "")
+  , ("spendingAmount3", "")
+  ]
 
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody

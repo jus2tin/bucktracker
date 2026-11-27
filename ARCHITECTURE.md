@@ -220,6 +220,14 @@ sync with its lines — it's *computed* as their sum
 something other than its total, because there's no second number to
 disagree with them.
 
+On the Transactions page, the spending form has three category/amount
+slots rather than a dynamic "add another line" control: the first is
+required, the other two are simply skipped if their amount is left
+blank. That covers the common case (a receipt split two or three ways)
+without needing any client-side JS — a genuine arbitrary-length split
+is already supported underneath by `Db.insertSpending`/
+`Domain.Transaction`, just not exposed past three lines in the UI yet.
+
 ### Zero-sum transfers
 
 Moving your own money between your own accounts — Checking to Savings,

@@ -2,10 +2,15 @@
 -- only (CLAUDE.md "Architecture") — the real logic already lives in
 -- 'Db.Transaction'/'Domain.Transaction'.
 --
--- v0.1 UI simplification (full split entry is already supported by
--- 'Db.Transaction.insertSpending'/'Domain.Transaction', just not
--- exposed here yet): a categorized transaction is entered as a single
--- line, as an expense (the amount typed is positive, stored negated).
+-- The spending form supports splits across up to three categories
+-- (amounts typed as positive expenses, stored negated) without any
+-- client-side JS: the first line is required, the other two are
+-- simply skipped if their amount is left blank (see 'parseOptionalLine').
+-- A genuine arbitrary-length split (already supported end-to-end by
+-- 'Db.Transaction.insertSpending'/'Domain.Transaction') would need a
+-- dynamic "add another line" control; three fixed slots cover the
+-- common case without that complexity.
+--
 -- The register always shows the *current* calendar month — there's no
 -- month picker yet, consistent with there being no multi-month
 -- rollover orchestrator either (see DECISIONS.md §8, H-5).
@@ -17,6 +22,7 @@ module Api.Transactions
 import Control.Monad.IO.Class (liftIO)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
@@ -37,7 +43,7 @@ import Domain.Error (DomainError (..))
 import Domain.Transaction
   ( Categorization (Categorized, Inflow, TransferLeg)
   , Transaction (txCategorization, txDate, txId, txPayee, txStatus)
-  , TransactionLine (TransactionLine)
+  , TransactionLine (TransactionLine, tlCategory)
   , transactionAmount
   )
 import Domain.Types
@@ -74,11 +80,15 @@ data NewInflowForm = NewInflowForm
   deriving anyclass (FromForm)
 
 data NewSpendingForm = NewSpendingForm
-  { spendingAccountId  :: Text
-  , spendingCategoryId :: Text
-  , spendingDate       :: Text
-  , spendingPayee      :: Text
-  , spendingAmount     :: Text
+  { spendingAccountId   :: Text
+  , spendingDate        :: Text
+  , spendingPayee       :: Text
+  , spendingCategoryId1 :: Text
+  , spendingAmount1     :: Text
+  , spendingCategoryId2 :: Text
+  , spendingAmount2     :: Text
+  , spendingCategoryId3 :: Text
+  , spendingAmount3     :: Text
   }
   deriving stock (Generic)
   deriving anyclass (FromForm)
@@ -121,30 +131,32 @@ createInflowHandler form = case parseAccountId (inflowAccountId form) of
 createSpendingHandler :: NewSpendingForm -> AppM (Html ())
 createSpendingHandler form = case parseAccountId (spendingAccountId form) of
   Nothing -> withError "Unknown account."
-  Just aid -> case parseCategoryId (spendingCategoryId form) of
-    Nothing -> withError "Unknown category."
-    Just cid -> case parseIsoDate (spendingDate form) of
-      Nothing -> withError "Invalid date."
-      Just day -> case parseEuros (spendingAmount form) of
-        Nothing -> withError "Invalid amount."
-        Just amt -> do
-          accounts <- withConn Db.listAccounts
-          categories <- withConn Db.listCategories
-          if not (any ((== aid) . accId) accounts)
-            then withError "Unknown account."
-            else
-              if not (any ((== cid) . catId) categories)
-                then withError "Unknown category."
-                else do
-                  let line = TransactionLine cid (negateCents amt) :| []
-                  result <-
-                    withConn
-                      (\conn -> Db.insertSpending conn aid day (spendingPayee form) defaultStatus line Nothing)
-                  case result of
-                    Left CategorizedTransactionRequiresOnBudgetAccount ->
-                      withError "Categorized transactions are not allowed on tracking accounts."
-                    Left _ -> withError "Could not create transaction."
-                    Right _ -> renderFragment Nothing
+  Just aid -> case parseIsoDate (spendingDate form) of
+    Nothing -> withError "Invalid date."
+    Just day -> case parseRequiredLine (spendingCategoryId1 form) (spendingAmount1 form) of
+      Left err -> withError err
+      Right line1 -> case parseOptionalLine (spendingCategoryId2 form) (spendingAmount2 form) of
+        Left err -> withError err
+        Right maybeLine2 -> case parseOptionalLine (spendingCategoryId3 form) (spendingAmount3 form) of
+          Left err -> withError err
+          Right maybeLine3 -> do
+            let lines' = line1 :| catMaybes [maybeLine2, maybeLine3]
+            accounts <- withConn Db.listAccounts
+            categories <- withConn Db.listCategories
+            if not (any ((== aid) . accId) accounts)
+              then withError "Unknown account."
+              else
+                if not (all (\l -> any ((== tlCategory l) . catId) categories) (toList lines'))
+                  then withError "Unknown category."
+                  else do
+                    result <-
+                      withConn
+                        (\conn -> Db.insertSpending conn aid day (spendingPayee form) defaultStatus lines' Nothing)
+                    case result of
+                      Left CategorizedTransactionRequiresOnBudgetAccount ->
+                        withError "Categorized transactions are not allowed on tracking accounts."
+                      Left _ -> withError "Could not create transaction."
+                      Right _ -> renderFragment Nothing
 
 createTransferHandler :: NewTransferForm -> AppM (Html ())
 createTransferHandler form = case parseAccountId (transferFromAccountId form) of
@@ -233,11 +245,21 @@ newSpendingForm :: [Account] -> [Category] -> Html ()
 newSpendingForm accounts categories =
   form_ [hxPost_ "/transactions/spending", hxTarget_ "#transactions-content", hxSwap_ "outerHTML"] $ do
     select_ [name_ "spendingAccountId"] (mapM_ accountOption (activeAccounts accounts))
-    select_ [name_ "spendingCategoryId"] (mapM_ categoryOption (activeCategories categories))
     input_ [type_ "date", name_ "spendingDate"]
     input_ [type_ "text", name_ "spendingPayee", placeholder_ "Payee"]
-    input_ [type_ "number", step_ "0.01", min_ "0", name_ "spendingAmount", placeholder_ "0.00"]
+    splitLine "spendingCategoryId1" "spendingAmount1" "0.00" categories
+    splitLine "spendingCategoryId2" "spendingAmount2" "0.00 (optional)" categories
+    splitLine "spendingCategoryId3" "spendingAmount3" "0.00 (optional)" categories
     button_ [type_ "submit"] "Add expense"
+
+-- | One split line: a category picker plus an amount. Leaving the
+-- amount blank on an optional line (see 'parseOptionalLine') is how a
+-- split with fewer than three lines works, without JS to add/remove
+-- rows.
+splitLine :: Text -> Text -> Text -> [Category] -> Html ()
+splitLine categoryFieldName amountFieldName amountPlaceholder categories = do
+  select_ [name_ categoryFieldName] (mapM_ categoryOption (activeCategories categories))
+  input_ [type_ "number", step_ "0.01", min_ "0", name_ amountFieldName, placeholder_ amountPlaceholder]
 
 newTransferForm :: [Account] -> Html ()
 newTransferForm accounts =
@@ -319,6 +341,25 @@ parseAccountId t = AccountId <$> parseInt64 t
 
 parseCategoryId :: Text -> Maybe CategoryId
 parseCategoryId t = CategoryId <$> parseInt64 t
+
+-- | One split line that's always part of the transaction (the form's
+-- first line) — a category and an amount, both required.
+parseRequiredLine :: Text -> Text -> Either Text TransactionLine
+parseRequiredLine catText amtText = case parseCategoryId catText of
+  Nothing -> Left "Unknown category."
+  Just cid -> case parseEuros amtText of
+    Nothing -> Left "Invalid amount."
+    Just amt -> Right (TransactionLine cid (negateCents amt))
+
+-- | A split line the user might not be using (the form's second/third
+-- line): a blank amount means "skip this line" — how the spending form
+-- supports an optional extra split without any client-side JS to
+-- add/remove rows. A non-blank amount is validated exactly like
+-- 'parseRequiredLine'.
+parseOptionalLine :: Text -> Text -> Either Text (Maybe TransactionLine)
+parseOptionalLine catText amtText
+  | Text.null (Text.strip amtText) = Right Nothing
+  | otherwise = Just <$> parseRequiredLine catText amtText
 
 parseInt64 :: Text -> Maybe Int64
 parseInt64 t = case TextRead.decimal t of
