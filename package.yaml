@@ -76,6 +76,7 @@ library:
   - transformers
   - uuid
   - wai
+  - wai-app-static
   - warp
 
 executables:

@@ -9,15 +9,15 @@ module Api.Accounts
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Read as TextRead
 import GHC.Generics (Generic)
 import Lucid
+import Lucid.Base (makeAttribute)
 import Servant
 import Servant.HTML.Lucid (HTML)
 
-import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment, successBanner)
+import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment, successBanner, xData_, xModel_, xOn_, xText_)
 import Api.Monad (AppM, withConn)
-import Api.Money (centsToEuroText)
+import Api.Money (centsToEuroText, parseSignedEuros)
 import qualified Db.Account as Db
 import qualified Db.Transaction as Db
 import Domain.Account (Account (accId, accName, accType), isArchived)
@@ -30,7 +30,7 @@ import Domain.Types
   , Cents
   , accountTypeFromText
   , accountTypeToText
-  , cents
+  , centsValue
   )
 import Web.FormUrlEncoded (FromForm)
 
@@ -91,7 +91,7 @@ archiveAccountHandler hx rawId = do
 -- discrepancy themselves (reconciliation is a pure comparison, not a
 -- type of its own, see DECISIONS.md §3).
 reconcileAccountHandler :: Maybe Text -> Int64 -> ReconcileForm -> AppM (Html ())
-reconcileAccountHandler hx rawId form = case parseEuros (statementBalance form) of
+reconcileAccountHandler hx rawId form = case parseSignedEuros (statementBalance form) of
   Nothing -> withError hx "Invalid statement balance."
   Just stmt -> do
     let aid = AccountId rawId
@@ -160,7 +160,7 @@ accountRow txs acc = tr_ $ do
   td_ [class_ "amount"] (toHtml (centsToEuroText (accountBalance (accId acc) txs)))
   td_ (toHtml (statusText (isArchived acc)))
   td_ (archiveButton acc)
-  td_ (reconcileForm acc)
+  td_ (reconcileForm txs acc)
   where
     statusText archived = if archived then "Archived" else "Active" :: Text
 
@@ -175,43 +175,43 @@ archiveButton acc
              "Archive"
 
 -- | Compares against 'Domain.Budget.clearedBalance' server-side
--- (reconcileAccountHandler) — this is just the one-field input for the
--- number the user read off their bank statement.
-reconcileForm :: Account -> Html ()
-reconcileForm acc =
+-- (reconcileAccountHandler) — now signed (an overdrawn checking
+-- account or a negative-balance liability can reconcile too, Architect
+-- review S-2.2), with a live Alpine @reconcileCalc@ wrapper that shows
+-- @Cleared − Statement = Difference@ as the user types, before they
+-- even click "Reconcile" — purely a preview; the server-side
+-- comparison in 'reconcileAccountHandler' is still what decides
+-- whether anything actually gets written.
+reconcileForm :: [Transaction] -> Account -> Html ()
+reconcileForm txs acc =
   let routePath = "/accounts/" <> accountIdText (accId acc) <> "/reconcile"
-  in form_ [method_ "post", action_ routePath, hxPost_ routePath, hxTarget_ "#accounts-content", hxSwap_ "outerHTML"] $ do
-       input_ [type_ "number", step_ "0.01", min_ "0", name_ "statementBalance", placeholder_ "Statement balance"]
-       button_ [type_ "submit"] "Reconcile"
+      cleared = clearedBalance (accId acc) txs
+  in form_
+       [ method_ "post"
+       , action_ routePath
+       , hxPost_ routePath
+       , hxTarget_ "#accounts-content"
+       , hxSwap_ "outerHTML"
+       , xData_ "reconcileCalc()"
+       , dataClearedCents_ (Text.pack (show (centsValue cleared)))
+       ]
+       $ do
+         input_
+           [ type_ "text"
+           , name_ "statementBalance"
+           , placeholder_ "Statement balance"
+           , xModel_ "statementBalance"
+           , xOn_ "input" "recalc()"
+           ]
+         button_ [type_ "submit"] "Reconcile"
+         p_ [xText_ "differenceLabel"] ""
+
+-- | @data-cleared-cents@ — the account's current 'clearedBalance', in
+-- integer cents, for 'reconcileForm'\'s Alpine component to read
+-- without re-deriving it (and without doing its own currency math on
+-- anything other than whatever the user is currently typing).
+dataClearedCents_ :: Text -> Attribute
+dataClearedCents_ = makeAttribute "data-cleared-cents"
 
 accountIdText :: AccountId -> Text
 accountIdText (AccountId i) = Text.pack (show i)
-
-parseInt64 :: Text -> Maybe Int64
-parseInt64 t = case TextRead.decimal t of
-  Right (n, rest) | Text.null rest -> Just n
-  _                                -> Nothing
-
--- | Parses a non-negative decimal euro amount (e.g. @"12.34"@ or
--- @"12"@) into whole cents, total and without 'Prelude.read'.
---
--- Deliberately still its own non-negative-only parser rather than
--- 'Api.Money.parseSignedEuros' — the reconcile field allows a @0.00@
--- statement balance (a fully-drained account), which
--- 'Api.Money.parsePositiveEuros' would wrongly reject. Switching this
--- field to accept negative (overdrawn) balances too is Track A Step 4.
-parseEuros :: Text -> Maybe Cents
-parseEuros raw = case Text.splitOn "." (Text.strip raw) of
-  [wholePart] -> centsFromParts wholePart "00"
-  [wholePart, fracPart]
-    | Text.length fracPart == 1 -> centsFromParts wholePart (fracPart <> "0")
-    | Text.length fracPart == 2 -> centsFromParts wholePart fracPart
-  _ -> Nothing
-
-centsFromParts :: Text -> Text -> Maybe Cents
-centsFromParts wholePart fracPart
-  | Text.null wholePart = Nothing
-  | otherwise = do
-      whole <- parseInt64 wholePart
-      frac <- parseInt64 fracPart
-      Just (cents (whole * 100 + frac))

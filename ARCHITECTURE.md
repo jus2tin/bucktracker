@@ -50,11 +50,18 @@ CDN, never run through a bundler. They're installed via Cabal
 already used — see `DECISIONS.md` §7/§12), located at runtime via the
 generated `Paths_bucktracker.getDataDir`, and stored once at startup as
 `appStaticDir` on `AppEnv` (`src/Api/Monad.hs`). `Api.hs` mounts
-`"static" :> Raw`, served by `servant-server`'s own
-`serveDirectoryWebApp` — so `GET /static/pico.min.css`,
-`/static/htmx.min.js`, `/static/alpine-csp.min.js`, and our own
-`/static/app.js` all just work, including in tests (`Api.Setup`
-resolves the same `appStaticDir` the real app does). `Api.Html.page`
+`"static" :> Raw`, served via `wai-app-static`'s `serveDirectoryWith`
+with `ssMaxAge = NoMaxAge` — deliberately not `servant-server`'s own
+`serveDirectoryWebApp`, whose default one-year `Cache-Control: max-age`
+is right for content-hashed CDN assets but wrong here: these files have
+no hash in their names and change on every Track A step, and a
+year-long browser cache silently serving a stale `app.js` past a
+rebuild is exactly the kind of bug a live-browser check (CLAUDE.md
+"Run the app") exists to catch, not reproduce. So `GET
+/static/pico.min.css`, `/static/htmx.min.js`, `/static/alpine-csp.min.js`,
+and our own `/static/app.js` all just work, including in tests
+(`Api.Setup` resolves the same `appStaticDir` the real app does).
+`Api.Html.page`
 links all four from `<head>` — HTMX and Alpine deferred, so they
 execute (in that order) after the DOM parses but before
 `DOMContentLoaded`. No CDN, no network dependency: Bucktracker works
@@ -268,13 +275,32 @@ sync with its lines — it's *computed* as their sum
 something other than its total, because there's no second number to
 disagree with them.
 
-On the Transactions page, the spending form has three category/amount
-slots rather than a dynamic "add another line" control: the first is
-required, the other two are simply skipped if their amount is left
-blank. That covers the common case (a receipt split two or three ways)
-without needing any client-side JS — a genuine arbitrary-length split
-is already supported underneath by `Db.insertSpending`/
-`Domain.Transaction`, just not exposed past three lines in the UI yet.
+On the Transactions page, the spending form is a genuine arbitrary-
+length (1..N) split editor, not a fixed number of slots: every split
+line's category/amount inputs share the same `name` attributes
+(`lineCategoryId`/`lineAmount`) regardless of how many lines exist, and
+`Api.Transactions.NewSpendingForm`'s hand-written `FromForm` instance
+collects all of them via `Web.FormUrlEncoded.lookupAll` rather than
+`Generic`-deriving fixed field names. The Alpine `splitEditor`
+component (`static/app.js`) adds/removes rows by cloning/removing a
+plain `.split-line` DOM node — deliberately not `x-for`/`<template>`,
+which the vendored Alpine CSP build's templating support is less
+certain to handle reliably — and shows a live, client-side-only
+"Unallocated: €X" preview as you type (a receipt total minus the
+lines' sum, in integer cents); Haskell never trusts that figure and
+still derives `transactionAmount` strictly from whatever lines actually
+arrive (invariant 3).
+
+A line's amount is *signed*: typing a negative amount
+(`Api.Money.parseNonZeroSignedEuros`) records a refund/credit against
+that category rather than an expense — the existing `negateCents`
+convention (a typed `40.00` is stored as `-€40`) already turns a typed
+`-15.00` into a stored `+€15` for free, so refunds needed no change to
+that convention, only to the parser accepting a sign at all. An
+inflow's amount is signed the same way (a negative inflow is an
+opening-balance correction); a transfer's amount stays strictly
+positive, since the direction is already chosen by which account is
+"from" and which is "to".
 
 ### Zero-sum transfers
 
@@ -312,11 +338,31 @@ small, separate steps: the Transactions page has a "Clear"/"Unclear"
 button per row (`Domain.Types.toggleCleared`) so you can mark what the
 bank has actually shown you so far; the Accounts page then has a
 one-field "Reconcile" form per account that compares `clearedBalance`
-to whatever you type in. On a match, `Db.Transaction.reconcileAccount`
-locks every `Cleared` transaction on that account in as `Reconciled`;
-on a mismatch, nothing is written at all — you get both numbers back
-to go find the missing, duplicate, or still-uncleared transaction
-yourself.
+to whatever you type in. The statement-balance field is signed
+(`Api.Money.parseSignedEuros`, zero included) so an overdrawn checking
+account or a negative-balance liability can reconcile too; an Alpine
+`reconcileCalc` component (`static/app.js`) reads the account's current
+`clearedBalance` off a `data-cleared-cents` attribute the server
+renders and shows a live "Cleared − Statement = Difference" preview as
+you type, before you even click "Reconcile" — again purely a preview,
+never the actual comparison. On a match,
+`Db.Transaction.reconcileAccount` locks every `Cleared` transaction on
+that account in as `Reconciled`; on a mismatch, nothing is written at
+all — you get both numbers back to go find the missing, duplicate, or
+still-uncleared transaction yourself.
+
+### Entry drawers and keyboard shortcuts
+
+The three entry forms on the Transactions page (Inflow, Expense,
+Transfer) are each wrapped in a plain `<details>`/`<summary>` rather
+than a `<dialog>` modal — native, no JS required for open/close, and no
+focus-trap behavior to get wrong. A document-level `keydown` listener
+in `static/app.js` (not an Alpine component — it has no per-element
+state, just global key handling) opens the matching drawer on `n`
+(Expense), `i` (Inflow), or `t` (Transfer) and focuses its first field,
+ignoring the shortcut entirely while focus is already in an input/
+textarea/select or a modifier key is held; `Escape` closes whichever
+drawer is open, everywhere on the page.
 
 ## Where do I change X?
 
@@ -332,4 +378,5 @@ yourself.
 | Add a new kind of domain error | `src/Domain/Error.hs` (`DomainError`); whichever `Domain`/`Db` function should raise it; the `Api` handler's `case result of Left ... -> ...` that turns it into an on-page message |
 | Change the SQLite pragmas, pool size, or backup behavior | `src/Db/Pool.hs` (pragmas, pool size); `src/Db/Backup.hs` (the online backup) |
 | Change an env var, its default, or the port | `src/Config.hs`; then update `CLAUDE.md`'s "Config" line and `README.md` |
-| Change how euros are parsed/formatted on a page | `src/Api/Money.hs` — `parseSignedEuros`/`parseNonZeroSignedEuros`/`parsePositiveEuros`/`centsToEuroText`, shared by every `Api.*` module (DECISIONS.md §12, Architect review S-2). `Api.Accounts`'s reconcile field is the one field still on its own local non-negative parser, since it must accept `€0.00` but not negative — `parsePositiveEuros` would wrongly reject the former, `parseSignedEuros` would wrongly accept the latter, until that field's own signed-amount rework (Track A Step 4) |
+| Change how euros are parsed/formatted on a page | `src/Api/Money.hs` — `parseSignedEuros`/`parseNonZeroSignedEuros`/`parsePositiveEuros`/`centsToEuroText`, shared by every `Api.*` module (DECISIONS.md §12, Architect review S-2). All euro fields now go through one of these three; which one encodes that field's legal range (e.g. a reconcile statement balance or a budget assignment can be negative or zero via `parseSignedEuros`, a split line/inflow can be negative but never exactly zero via `parseNonZeroSignedEuros`, a transfer must be strictly positive via `parsePositiveEuros`) |
+| Add or remove a split line, or change how many a transaction can have | `src/Api/Transactions.hs` — `NewSpendingForm`'s `FromForm` instance (`lookupAll "lineCategoryId"`/`"lineAmount"`) collects however many `lineCategoryId`/`lineAmount` pairs the form submits; `parseSplitLines` parses them; nothing caps the count server-side. Client-side add/remove rows: `static/app.js`'s `splitEditor` Alpine component |

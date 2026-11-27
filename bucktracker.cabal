@@ -94,6 +94,7 @@ library
     , transformers
     , uuid
     , wai
+    , wai-app-static
     , warp
   default-language: GHC2021
 

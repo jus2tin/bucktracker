@@ -5,9 +5,10 @@ module Api
 
 import Control.Monad.Except (throwError)
 import Lucid (Html)
-import Network.Wai (Application)
+import Network.Wai.Application.Static (defaultWebAppSettings, ssMaxAge)
 import Servant
 import Servant.HTML.Lucid (HTML)
+import WaiAppStatic.Types (MaxAge (NoMaxAge))
 
 import Api.Accounts (AccountsApi, accountsServer)
 import Api.Budget (BudgetApi, budgetServer)
@@ -30,6 +31,14 @@ rootApi = Proxy
 -- 'AppEnv', so unlike the other (env-independent) sub-servers, this one
 -- has to be built per-request-environment rather than once as a plain
 -- top-level value.
+--
+-- Deliberately 'serveDirectoryWith' with 'NoMaxAge', not the
+-- 'serveDirectoryWebApp' default (a one-year @Cache-Control: max-age@)
+-- — these files have no content hash in their names, and change every
+-- time a Track A step touches @static/app.js@; a year-long browser
+-- cache silently kept serving a stale script past several rebuilds
+-- during Step 4's own live-browser verification (ARCHITECTURE.md
+-- "Static assets").
 server :: AppEnv -> ServerT RootApi AppM
 server env =
   rootHandler
@@ -37,7 +46,7 @@ server env =
     :<|> categoriesServer
     :<|> transactionsServer
     :<|> budgetServer
-    :<|> serveDirectoryWebApp (appStaticDir env)
+    :<|> serveDirectoryWith (defaultWebAppSettings (appStaticDir env)) {ssMaxAge = NoMaxAge}
 
 -- | "/" redirects to "/budget", the closest thing to a dashboard today.
 rootHandler :: AppM (Html ())

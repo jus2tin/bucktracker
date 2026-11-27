@@ -101,6 +101,30 @@ spec = with withTestApp $ do
       response <- postHtmlForm "/accounts/999/reconcile" [("statementBalance", "0.00")]
       liftIO (bodyContains "Unknown account" response `shouldBe` True)
 
+    it "reconciles a negative (overdrawn) statement balance (S-2.2 fix)" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      today <- liftIO (showGregorian . utctDay <$> getCurrentTime)
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", today), ("inflowPayee", "Salary"), ("inflowAmount", "50.00")]
+      _ <- postHtmlForm "/transactions/1/clear" []
+      _ <-
+        postHtmlForm
+          "/transactions/spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingDate", today)
+          , ("spendingPayee", "Supermarket")
+          , ("lineCategoryId", "1")
+          , ("lineAmount", "80.00")
+          ]
+      _ <- postHtmlForm "/transactions/2/clear" []
+      -- cleared = 50.00 - 80.00 = -30.00
+      response <- postHtmlForm "/accounts/1/reconcile" [("statementBalance", "-30.00")]
+      liftIO (bodyContains "reconciled" response `shouldBe` True)
+
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody
 
