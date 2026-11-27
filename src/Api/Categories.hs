@@ -15,7 +15,7 @@ import Lucid
 import Servant
 import Servant.HTML.Lucid (HTML)
 
-import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, page)
+import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment)
 import Api.Monad (AppM, withConn)
 import qualified Db.Category as Db
 import Domain.Category
@@ -30,10 +30,10 @@ import Web.FormUrlEncoded (FromForm)
 
 type CategoriesApi =
   "categories" :> Get '[HTML] (Html ())
-    :<|> "category-groups" :> ReqBody '[FormUrlEncoded] NewCategoryGroupForm :> Post '[HTML] (Html ())
-    :<|> "category-groups" :> Capture "id" Int64 :> "archive" :> Post '[HTML] (Html ())
-    :<|> "categories" :> ReqBody '[FormUrlEncoded] NewCategoryForm :> Post '[HTML] (Html ())
-    :<|> "categories" :> Capture "id" Int64 :> "archive" :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "category-groups" :> ReqBody '[FormUrlEncoded] NewCategoryGroupForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "category-groups" :> Capture "id" Int64 :> "archive" :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "categories" :> ReqBody '[FormUrlEncoded] NewCategoryForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "categories" :> Capture "id" Int64 :> "archive" :> Post '[HTML] (Html ())
 
 newtype NewCategoryGroupForm = NewCategoryGroupForm
   { name :: Text
@@ -60,54 +60,53 @@ categoriesServer =
     :<|> archiveCategoryHandler
 
 listCategoriesHandler :: AppM (Html ())
-listCategoriesHandler = do
-  groups <- withConn Db.listCategoryGroups
-  categories <- withConn Db.listCategories
-  pure (page "Categories" (categoriesContent Nothing groups categories))
+listCategoriesHandler = renderFragment Nothing Nothing
 
-createCategoryGroupHandler :: NewCategoryGroupForm -> AppM (Html ())
-createCategoryGroupHandler form = do
+createCategoryGroupHandler :: Maybe Text -> NewCategoryGroupForm -> AppM (Html ())
+createCategoryGroupHandler hx form = do
   result <- withConn (\conn -> Db.insertCategoryGroup conn (name form))
   case result of
-    Left (EmptyName _) -> withError "Name must not be empty."
-    Left _ -> withError "Could not create category group."
-    Right _ -> renderFragment Nothing
+    Left (EmptyName _) -> withError hx "Name must not be empty."
+    Left _ -> withError hx "Could not create category group."
+    Right _ -> renderFragment hx Nothing
 
-archiveCategoryGroupHandler :: Int64 -> AppM (Html ())
-archiveCategoryGroupHandler rawId = do
+archiveCategoryGroupHandler :: Maybe Text -> Int64 -> AppM (Html ())
+archiveCategoryGroupHandler hx rawId = do
   withConn (\conn -> Db.archiveCategoryGroup conn (CategoryGroupId rawId))
-  renderFragment Nothing
+  renderFragment hx Nothing
 
-createCategoryHandler :: NewCategoryForm -> AppM (Html ())
-createCategoryHandler form = case parseCategoryGroupId (groupId form) of
-  Nothing -> withError "Unknown category group."
+createCategoryHandler :: Maybe Text -> NewCategoryForm -> AppM (Html ())
+createCategoryHandler hx form = case parseCategoryGroupId (groupId form) of
+  Nothing -> withError hx "Unknown category group."
   Just gid -> do
     groups <- withConn Db.listCategoryGroups
     if any ((== gid) . cgId) groups
       then do
         result <- withConn (\conn -> Db.insertCategory conn gid (categoryName form))
         case result of
-          Left (EmptyName _) -> withError "Name must not be empty."
-          Left _ -> withError "Could not create category."
-          Right _ -> renderFragment Nothing
-      else withError "Unknown category group."
+          Left (EmptyName _) -> withError hx "Name must not be empty."
+          Left _ -> withError hx "Could not create category."
+          Right _ -> renderFragment hx Nothing
+      else withError hx "Unknown category group."
 
-archiveCategoryHandler :: Int64 -> AppM (Html ())
-archiveCategoryHandler rawId = do
+archiveCategoryHandler :: Maybe Text -> Int64 -> AppM (Html ())
+archiveCategoryHandler hx rawId = do
   withConn (\conn -> Db.archiveCategory conn (CategoryId rawId))
-  renderFragment Nothing
+  renderFragment hx Nothing
 
-withError :: Text -> AppM (Html ())
-withError msg = renderFragment (Just msg)
+withError :: Maybe Text -> Text -> AppM (Html ())
+withError hx msg = renderFragment hx (Just msg)
 
--- | Every mutating handler renders back exactly this fragment: HTMX
--- swaps @#categories-content@ (hx-swap="outerHTML"), so the page updates
--- without a full navigation.
-renderFragment :: Maybe Text -> AppM (Html ())
-renderFragment err = do
+-- | Every mutating handler renders back through this. A plain
+-- (non-HTMX) request gets a full page back — the progressive-
+-- enhancement fallback for when HTMX didn't load — an HTMX request
+-- gets just the @#categories-content@ fragment it's about to swap in
+-- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'.
+renderFragment :: Maybe Text -> Maybe Text -> AppM (Html ())
+renderFragment hx err = do
   groups <- withConn Db.listCategoryGroups
   categories <- withConn Db.listCategories
-  pure (categoriesContent err groups categories)
+  pure (pageOrFragment hx "Categories" (categoriesContent err groups categories))
 
 categoriesContent :: Maybe Text -> [CategoryGroup] -> [Category] -> Html ()
 categoriesContent err groups categories = div_ [id_ "categories-content"] $ do
@@ -119,9 +118,16 @@ categoriesContent err groups categories = div_ [id_ "categories-content"] $ do
 
 newCategoryGroupForm :: Html ()
 newCategoryGroupForm =
-  form_ [hxPost_ "/category-groups", hxTarget_ "#categories-content", hxSwap_ "outerHTML"] $ do
-    input_ [type_ "text", name_ "name", placeholder_ "Group name"]
-    button_ [type_ "submit"] "Add group"
+  form_
+    [ method_ "post"
+    , action_ "/category-groups"
+    , hxPost_ "/category-groups"
+    , hxTarget_ "#categories-content"
+    , hxSwap_ "outerHTML"
+    ]
+    $ do
+      input_ [type_ "text", name_ "name", placeholder_ "Group name"]
+      button_ [type_ "submit"] "Add group"
 
 categoryGroupsTable :: [CategoryGroup] -> Html ()
 categoryGroupsTable groups = table_ $ do
@@ -138,16 +144,15 @@ archiveGroupButton :: CategoryGroup -> Html ()
 archiveGroupButton cg
   | isArchivedGroup cg = mempty
   | otherwise =
-      button_
-        [ hxPost_ ("/category-groups/" <> categoryGroupIdText (cgId cg) <> "/archive")
-        , hxTarget_ "#categories-content"
-        , hxSwap_ "outerHTML"
-        ]
-        "Archive"
+      let routePath = "/category-groups/" <> categoryGroupIdText (cgId cg) <> "/archive"
+      in form_ [method_ "post", action_ routePath] $
+           button_
+             [type_ "submit", hxPost_ routePath, hxTarget_ "#categories-content", hxSwap_ "outerHTML"]
+             "Archive"
 
 newCategoryForm :: [CategoryGroup] -> Html ()
 newCategoryForm groups =
-  form_ [hxPost_ "/categories", hxTarget_ "#categories-content", hxSwap_ "outerHTML"] $ do
+  form_ [method_ "post", action_ "/categories", hxPost_ "/categories", hxTarget_ "#categories-content", hxSwap_ "outerHTML"] $ do
     input_ [type_ "text", name_ "categoryName", placeholder_ "Category name"]
     select_ [name_ "groupId"] (mapM_ groupOption (filter (not . isArchivedGroup) groups))
     button_ [type_ "submit"] "Add category"
@@ -176,12 +181,11 @@ archiveCategoryButton :: Category -> Html ()
 archiveCategoryButton cat
   | isArchivedCategory cat = mempty
   | otherwise =
-      button_
-        [ hxPost_ ("/categories/" <> categoryIdText (catId cat) <> "/archive")
-        , hxTarget_ "#categories-content"
-        , hxSwap_ "outerHTML"
-        ]
-        "Archive"
+      let routePath = "/categories/" <> categoryIdText (catId cat) <> "/archive"
+      in form_ [method_ "post", action_ routePath] $
+           button_
+             [type_ "submit", hxPost_ routePath, hxTarget_ "#categories-content", hxSwap_ "outerHTML"]
+             "Archive"
 
 statusText :: Bool -> Text
 statusText archived = if archived then "Archived" else "Active"

@@ -39,14 +39,14 @@
 - [x] **Mount `"static" :> Raw` in `src/Api.hs`:** Served via `serveDirectoryWebApp`. (The `<script defer src="/static/...">` tags themselves are **not** added yet — pages still load HTMX from the CDN; wiring `Api.Html.page` to the new assets is Step 2's job, see `ARCHITECTURE.md` "Static assets".)
 - [x] **Tests & Docs:** `test/Api/StaticSpec.hs` (new) verifies `GET /static/pico.min.css`, `/static/htmx.min.js`, `/static/alpine-csp.min.js`, and `/static/app.js` return `200` with the right content-type family, and that an unknown asset 404s. `ARCHITECTURE.md` documents `/static/*` (new "Static assets" section + a "Where do I change X?" row).
 
-### Step 2 — Semantic Pico CSS Layout, HTMX Fragment Fix & Progressive Form Fallbacks (`S-1`, `H-5`)
-- [ ] **Adopt semantic Pico markup (`src/Api/Html.hs`):**
-  - Update `page` to link `/static/pico.min.css`, `/static/htmx.min.js`, `/static/app.js`, and `/static/alpine-csp.min.js` (`defer_ ""`), replacing custom inline CSS boilerplate with minimal semantic overrides (e.g., `.error`, `.success`, right-aligned numeric columns).
-  - Structure `body_` semantically as `<header class="container"><nav>...</nav></header><main class="container">...</main>` so Pico styles navigation, tables, forms, `<article>` cards, and `<dialog>` elements automatically in both light and dark mode without utility-class clutter.
-  - Add reusable Lucid attribute helpers needed across Track A (`hxConfirm_`, `hxTrigger_`, `hxGet_`, `xData_`, `xShow_`, `xText_`, `xOn_`, etc.).
-- [ ] **Fix HTMX full-page double-nesting bug (`S-1`):** Separate `GET` full-page handlers from `POST` fragment rendering in `src/Api/Transactions.hs` and `src/Api/Budget.hs` so HTMX swaps **only** `#transactions-content` / `#budget-content` (never nesting `<!DOCTYPE html>` or duplicate `<nav>` bars).
-- [ ] **Add progressive enhancement on all forms:** Add `method_ "post"` and `action_ "<route>"` to every `<form>` across all pages, and inspect `Header "HX-Request" Text` so plain non-HTMX browser POSTs receive a full `page` wrapper while HTMX requests receive the bare `#...-content` fragment.
-- [ ] **Tests:** Assert in all `Api.*Spec` modules that `POST` requests with `HX-Request: true` return fragments free of `<!DOCTYPE html>` and `<nav>`, while `GET` requests include Pico/HTMX/Alpine `/static/*` tags.
+### Step 2 — Semantic Pico CSS Layout, HTMX Fragment Fix & Progressive Form Fallbacks (`S-1`, `H-5`) ✅ Done
+- [x] **Adopt semantic Pico markup (`src/Api/Html.hs`):**
+  - `page` now links `/static/pico.min.css`, `/static/htmx.min.js`, `/static/alpine-csp.min.js`, and `/static/app.js` (all `defer_ ""`), replacing the old inline CSS boilerplate with minimal overrides (`.error`, `.success`, `.amount` for right-aligned numeric columns).
+  - `body_` is now `<header class="container"><nav>...</nav></header><main class="container">...</main>`.
+  - Added `hxGet_`, `hxConfirm_`, `hxTrigger_`, `xData_`, `xShow_`, `xText_`, `xOn_` (unused for now — land with Steps 3-4/6).
+- [x] **Fixed the HTMX full-page double-nesting bug (`S-1`):** `Api.Transactions`/`Api.Budget` no longer wrap every response in `page` unconditionally. A single new `Api.Html.pageOrFragment` (named to avoid colliding with `Servant.respond`) decides fragment vs. full page from the `HX-Request` header, and every one of the four pages' mutating handlers goes through it now (not just the two that had the bug).
+- [x] **Progressive enhancement on all forms:** every `<form>` across all four pages now has `method_ "post"`/`action_ "<route>"` alongside its `hx-*` attributes; every previously-bare `hx-post` button (archive, clear) is now wrapped in its own single-button `<form>` too, so it still does something when HTMX hasn't loaded. Every mutating route gained `Header "HX-Request" Text` as its first handler argument.
+- [x] **Tests:** `Api.Setup.postHtmlFormHx` (new) sends `HX-Request: true`; each `Api.*Spec` now asserts a plain POST gets a full page (`<!doctype html>`/`<nav>`) while an HTMX POST gets a bare fragment, and that `GET` responses link the `/static/*` assets. 109 examples, 0 failures.
 
 ### Step 3 — Shared Overflow-Safe `Api.Money` Codec & Inline Cell Editing on `/budget` (`S-2`, `S-4` partial)
 - [ ] **Extract `src/Api/Money.hs`:** Deduplicate the 3 copy-pasted `centsToEuroText` / `parseEuros` blocks in `Api.Accounts`, `Api.Transactions`, and `Api.Budget`:

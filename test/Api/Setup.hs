@@ -14,16 +14,24 @@
 -- the OS temp directory cleans itself up regardless.
 module Api.Setup
   ( withTestApp
+  , postHtmlFormHx
   ) where
 
 import Api (application)
 import Api.Monad (AppEnv (AppEnv))
+import Data.Bifunctor (bimap)
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString.Lazy as LBS
 import Db.Pool (createPool)
+import Network.HTTP.Types (hContentType, methodPost)
+import Network.HTTP.Types.URI (renderSimpleQuery)
 import Network.Wai (Application)
+import Network.Wai.Test (SResponse)
 import Paths_bucktracker (getDataDir)
 import System.Directory (getTemporaryDirectory)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
+import Test.Hspec.Wai (WaiSession, request)
 
 withTestApp :: IO Application
 withTestApp = do
@@ -38,3 +46,16 @@ freshTempDbPath = do
   (path, handle) <- openTempFile tmpDir "bucktracker-api-test.db"
   hClose handle
   pure path
+
+-- | Like 'Test.Hspec.Wai.postHtmlForm', but also sends
+-- @HX-Request: true@ — simulates a real HTMX-driven POST, as opposed
+-- to a plain browser form submission (the progressive-enhancement
+-- fallback for when HTMX didn't load). Use this to assert the two
+-- cases render differently: a bare @#...-content@ fragment here, a
+-- full 'Api.Html.page' when the header is absent (see
+-- 'Api.Html.pageOrFragment' — the S-1 fix).
+postHtmlFormHx :: BS8.ByteString -> [(String, String)] -> WaiSession st SResponse
+postHtmlFormHx path formParams =
+  request methodPost path [(hContentType, "application/x-www-form-urlencoded"), ("HX-Request", "true")] body
+  where
+    body = LBS.fromStrict (renderSimpleQuery False (map (bimap BS8.pack BS8.pack) formParams))

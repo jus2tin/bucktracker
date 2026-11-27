@@ -15,7 +15,7 @@ import Lucid
 import Servant
 import Servant.HTML.Lucid (HTML)
 
-import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, page, successBanner)
+import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment, successBanner)
 import Api.Monad (AppM, withConn)
 import qualified Db.Account as Db
 import qualified Db.Transaction as Db
@@ -36,9 +36,9 @@ import Web.FormUrlEncoded (FromForm)
 
 type AccountsApi =
   "accounts" :> Get '[HTML] (Html ())
-    :<|> "accounts" :> ReqBody '[FormUrlEncoded] NewAccountForm :> Post '[HTML] (Html ())
-    :<|> "accounts" :> Capture "id" Int64 :> "archive" :> Post '[HTML] (Html ())
-    :<|> "accounts" :> Capture "id" Int64 :> "reconcile" :> ReqBody '[FormUrlEncoded] ReconcileForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "accounts" :> ReqBody '[FormUrlEncoded] NewAccountForm :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "accounts" :> Capture "id" Int64 :> "archive" :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "accounts" :> Capture "id" Int64 :> "reconcile" :> ReqBody '[FormUrlEncoded] ReconcileForm :> Post '[HTML] (Html ())
 
 -- | Field names must match the @name@ attributes of 'newAccountForm'
 -- below — 'FromForm' parses by field name.
@@ -64,28 +64,22 @@ accountsServer =
     :<|> reconcileAccountHandler
 
 listAccountsHandler :: AppM (Html ())
-listAccountsHandler = do
-  accounts <- withConn Db.listAccounts
-  txs <- withConn Db.listAllTransactions
-  pure (page "Accounts" (accountsContent Nothing Nothing accounts txs))
+listAccountsHandler = renderFragment Nothing Nothing Nothing
 
-createAccountHandler :: NewAccountForm -> AppM (Html ())
-createAccountHandler form = case accountTypeFromText (accountType form) of
-  Nothing -> withError "Unknown account type."
+createAccountHandler :: Maybe Text -> NewAccountForm -> AppM (Html ())
+createAccountHandler hx form = case accountTypeFromText (accountType form) of
+  Nothing -> withError hx "Unknown account type."
   Just ty -> do
     result <- withConn (\conn -> Db.insertAccount conn (name form) ty)
     case result of
-      Left (EmptyName _) -> withError "Name must not be empty."
-      Left _ -> withError "Could not create account."
-      Right _ -> renderFragment Nothing Nothing
-  where
-    withError :: Text -> AppM (Html ())
-    withError msg = renderFragment (Just msg) Nothing
+      Left (EmptyName _) -> withError hx "Name must not be empty."
+      Left _ -> withError hx "Could not create account."
+      Right _ -> renderFragment hx Nothing Nothing
 
-archiveAccountHandler :: Int64 -> AppM (Html ())
-archiveAccountHandler rawId = do
+archiveAccountHandler :: Maybe Text -> Int64 -> AppM (Html ())
+archiveAccountHandler hx rawId = do
   withConn (\conn -> Db.archiveAccount conn (AccountId rawId))
-  renderFragment Nothing Nothing
+  renderFragment hx Nothing Nothing
 
 -- | The reconciliation workflow (DECISIONS.md §4/§3): compares
 -- 'Domain.Budget.clearedBalance' (everything the register has marked
@@ -96,41 +90,44 @@ archiveAccountHandler rawId = do
 -- written — the user gets the two numbers back to go find the
 -- discrepancy themselves (reconciliation is a pure comparison, not a
 -- type of its own, see DECISIONS.md §3).
-reconcileAccountHandler :: Int64 -> ReconcileForm -> AppM (Html ())
-reconcileAccountHandler rawId form = case parseEuros (statementBalance form) of
-  Nothing -> withError "Invalid statement balance."
+reconcileAccountHandler :: Maybe Text -> Int64 -> ReconcileForm -> AppM (Html ())
+reconcileAccountHandler hx rawId form = case parseEuros (statementBalance form) of
+  Nothing -> withError hx "Invalid statement balance."
   Just stmt -> do
     let aid = AccountId rawId
     accounts <- withConn Db.listAccounts
     if not (any ((== aid) . accId) accounts)
-      then withError "Unknown account."
+      then withError hx "Unknown account."
       else do
         txs <- withConn (\conn -> Db.listTransactionsForAccount conn aid)
         let cleared = clearedBalance aid txs
         if cleared == stmt
           then do
             withConn (\conn -> Db.reconcileAccount conn aid)
-            renderFragment Nothing (Just "Account reconciled.")
+            renderFragment hx Nothing (Just "Account reconciled.")
           else
             withError
+              hx
               ( "Doesn't match: your cleared transactions add up to "
                   <> centsToEuroText cleared
                   <> ", not "
                   <> centsToEuroText stmt
                   <> ". Nothing was changed — check for a missing, duplicate, or uncleared transaction."
               )
-  where
-    withError :: Text -> AppM (Html ())
-    withError msg = renderFragment (Just msg) Nothing
 
--- | Every mutating handler renders back exactly this fragment: HTMX
--- swaps @#accounts-content@ (hx-swap="outerHTML"), so the page updates
--- without a full navigation.
-renderFragment :: Maybe Text -> Maybe Text -> AppM (Html ())
-renderFragment err successMsg = do
+withError :: Maybe Text -> Text -> AppM (Html ())
+withError hx msg = renderFragment hx (Just msg) Nothing
+
+-- | Every mutating handler renders back through this. A plain
+-- (non-HTMX) request gets a full page back — the progressive-
+-- enhancement fallback for when HTMX didn't load — an HTMX request
+-- gets just the @#accounts-content@ fragment it's about to swap in
+-- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'.
+renderFragment :: Maybe Text -> Maybe Text -> Maybe Text -> AppM (Html ())
+renderFragment hx err successMsg = do
   accounts <- withConn Db.listAccounts
   txs <- withConn Db.listAllTransactions
-  pure (accountsContent err successMsg accounts txs)
+  pure (pageOrFragment hx "Accounts" (accountsContent err successMsg accounts txs))
 
 accountsContent :: Maybe Text -> Maybe Text -> [Account] -> [Transaction] -> Html ()
 accountsContent err successMsg accounts txs = div_ [id_ "accounts-content"] $ do
@@ -141,10 +138,12 @@ accountsContent err successMsg accounts txs = div_ [id_ "accounts-content"] $ do
 
 newAccountForm :: Html ()
 newAccountForm =
-  form_ [hxPost_ "/accounts", hxTarget_ "#accounts-content", hxSwap_ "outerHTML"] $ do
-    input_ [type_ "text", name_ "name", placeholder_ "Name"]
-    select_ [name_ "accountType"] (mapM_ accountTypeOption [minBound .. maxBound])
-    button_ [type_ "submit"] "Add"
+  form_
+    [method_ "post", action_ "/accounts", hxPost_ "/accounts", hxTarget_ "#accounts-content", hxSwap_ "outerHTML"]
+    $ do
+      input_ [type_ "text", name_ "name", placeholder_ "Name"]
+      select_ [name_ "accountType"] (mapM_ accountTypeOption [minBound .. maxBound])
+      button_ [type_ "submit"] "Add"
 
 accountTypeOption :: AccountType -> Html ()
 accountTypeOption ty = option_ [value_ (accountTypeToText ty)] (toHtml (accountTypeToText ty))
@@ -158,7 +157,7 @@ accountRow :: [Transaction] -> Account -> Html ()
 accountRow txs acc = tr_ $ do
   td_ (toHtml (accName acc))
   td_ (toHtml (accountTypeToText (accType acc)))
-  td_ (toHtml (centsToEuroText (accountBalance (accId acc) txs)))
+  td_ [class_ "amount"] (toHtml (centsToEuroText (accountBalance (accId acc) txs)))
   td_ (toHtml (statusText (isArchived acc)))
   td_ (archiveButton acc)
   td_ (reconcileForm acc)
@@ -169,26 +168,21 @@ archiveButton :: Account -> Html ()
 archiveButton acc
   | isArchived acc = mempty
   | otherwise =
-      button_
-        [ hxPost_ ("/accounts/" <> accountIdText (accId acc) <> "/archive")
-        , hxTarget_ "#accounts-content"
-        , hxSwap_ "outerHTML"
-        ]
-        "Archive"
+      let routePath = "/accounts/" <> accountIdText (accId acc) <> "/archive"
+      in form_ [method_ "post", action_ routePath] $
+           button_
+             [type_ "submit", hxPost_ routePath, hxTarget_ "#accounts-content", hxSwap_ "outerHTML"]
+             "Archive"
 
 -- | Compares against 'Domain.Budget.clearedBalance' server-side
 -- (reconcileAccountHandler) — this is just the one-field input for the
 -- number the user read off their bank statement.
 reconcileForm :: Account -> Html ()
 reconcileForm acc =
-  form_
-    [ hxPost_ ("/accounts/" <> accountIdText (accId acc) <> "/reconcile")
-    , hxTarget_ "#accounts-content"
-    , hxSwap_ "outerHTML"
-    ]
-    $ do
-      input_ [type_ "number", step_ "0.01", min_ "0", name_ "statementBalance", placeholder_ "Statement balance"]
-      button_ [type_ "submit"] "Reconcile"
+  let routePath = "/accounts/" <> accountIdText (accId acc) <> "/reconcile"
+  in form_ [method_ "post", action_ routePath, hxPost_ routePath, hxTarget_ "#accounts-content", hxSwap_ "outerHTML"] $ do
+       input_ [type_ "number", step_ "0.01", min_ "0", name_ "statementBalance", placeholder_ "Statement balance"]
+       button_ [type_ "submit"] "Reconcile"
 
 accountIdText :: AccountId -> Text
 accountIdText (AccountId i) = Text.pack (show i)

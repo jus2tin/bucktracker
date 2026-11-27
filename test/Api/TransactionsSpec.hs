@@ -1,7 +1,8 @@
 module Api.TransactionsSpec (spec) where
 
-import Api.Setup (withTestApp)
+import Api.Setup (postHtmlFormHx, withTestApp)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
+import Data.Char (toLower)
 import Data.List (isInfixOf)
 import Data.Time (getCurrentTime, showGregorian, utctDay)
 import Network.Wai.Test (SResponse (simpleBody))
@@ -17,9 +18,34 @@ today = showGregorian . utctDay <$> getCurrentTime
 
 spec :: Spec
 spec = with withTestApp $ do
-  describe "GET /transactions" $
+  describe "GET /transactions" $ do
     it "shows an empty register as long as there are no transactions" $
       get "/transactions" `shouldRespondWith` 200
+
+    it "is a full page linking the vendored static assets" $ do
+      response <- get "/transactions"
+      liftIO (bodyContains "/static/pico.min.css" response `shouldBe` True)
+      liftIO (bodyContainsCI "<!doctype html" response `shouldBe` True)
+
+  describe "fragment vs. full page (S-1 fix)" $ do
+    it "a plain (non-HTMX) POST gets a full page back, not a bare fragment (this used to always nest a full page inside the swap target)" $ do
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "999"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "1")]
+      liftIO (bodyContainsCI "<!doctype html" response `shouldBe` True)
+      liftIO (bodyContains "<nav" response `shouldBe` True)
+
+    it "an HTMX POST (HX-Request: true) gets just the #transactions-content fragment, not a nested page" $ do
+      day <- liftIO today
+      response <-
+        postHtmlFormHx
+          "/transactions/inflow"
+          [("inflowAccountId", "999"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "1")]
+      liftIO (bodyContainsCI "<!doctype html" response `shouldBe` False)
+      liftIO (bodyContains "<nav" response `shouldBe` False)
+      liftIO (bodyContains "Unknown account" response `shouldBe` True)
 
   describe "POST /transactions/inflow" $ do
     it "creates an inflow transaction and shows it in the register" $ do
@@ -165,3 +191,8 @@ singleLineSpending day accountId categoryId amount =
 
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody
+
+-- | Case-insensitive: Lucid's exact casing for the doctype declaration
+-- isn't a contract worth pinning a test to.
+bodyContainsCI :: String -> SResponse -> Bool
+bodyContainsCI needle = (map toLower needle `isInfixOf`) . map toLower . BSL8.unpack . simpleBody

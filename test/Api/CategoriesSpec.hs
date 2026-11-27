@@ -1,7 +1,8 @@
 module Api.CategoriesSpec (spec) where
 
-import Api.Setup (withTestApp)
+import Api.Setup (postHtmlFormHx, withTestApp)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
+import Data.Char (toLower)
 import Data.List (isInfixOf)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
@@ -11,9 +12,24 @@ import Test.Hspec.Wai
 
 spec :: Spec
 spec = with withTestApp $ do
-  describe "GET /categories" $
+  describe "GET /categories" $ do
     it "shows empty tables as long as there are no category groups" $
       get "/categories" `shouldRespondWith` 200
+
+    it "is a full page linking the vendored static assets" $ do
+      response <- get "/categories"
+      liftIO (bodyContains "/static/pico.min.css" response `shouldBe` True)
+      liftIO (bodyContainsCI "<!doctype html" response `shouldBe` True)
+
+  describe "fragment vs. full page (S-1 fix)" $ do
+    it "a plain (non-HTMX) POST gets a full page back, not a bare fragment" $ do
+      response <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      liftIO (bodyContainsCI "<!doctype html" response `shouldBe` True)
+
+    it "an HTMX POST (HX-Request: true) gets just the #categories-content fragment" $ do
+      response <- postHtmlFormHx "/category-groups" [("name", "Everyday Expenses")]
+      liftIO (bodyContainsCI "<!doctype html" response `shouldBe` False)
+      liftIO (bodyContains "Everyday Expenses" response `shouldBe` True)
 
   describe "POST /category-groups" $ do
     it "creates a category group and shows it in the table" $ do
@@ -60,6 +76,11 @@ spec = with withTestApp $ do
 
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody
+
+-- | Case-insensitive: Lucid's exact casing for the doctype declaration
+-- isn't a contract worth pinning a test to.
+bodyContainsCI :: String -> SResponse -> Bool
+bodyContainsCI needle = (map toLower needle `isInfixOf`) . map toLower . BSL8.unpack . simpleBody
 
 countOccurrences :: TL.Text -> SResponse -> Int
 countOccurrences needle = fromIntegral . TL.count needle . TLE.decodeUtf8 . simpleBody
