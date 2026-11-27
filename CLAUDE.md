@@ -50,6 +50,13 @@ including known v0.1 limitations and what's deliberately still open.
 - Run: `stack run`
 - Linter/Formatter (if present): `hlint src/` and `ormolu --mode inplace src/`
 
+## Context & Token Hygiene
+- **One `stack test` per completed step, never `stack build` + `stack test`:** `stack test` already compiles the library, executable, and test suite. Don't run `stack build` separately beforehand — batch edits for a step and run `stack test` once at the end.
+- **Quiet test output on passing runs:** default to `stack test --test-arguments="--format=progress"` so a passing run doesn't flood context with dozens of green lines. Switch to `--format=specdoc` or filter with `-m "<pattern>"` only when debugging a specific failure.
+- **Read targeted line ranges on large files:** once the module structure is known, use `offset`/`limit` to inspect large files (e.g. `ARCHITECTURE.md`, long test suites) rather than re-reading them whole repeatedly.
+- **Concise status updates:** keep chat responses brief and factual (what changed, test status, commit hash). Detailed architectural rationale belongs in `ARCHITECTURE.md`, `DECISIONS.md`, or `docs/handoffs/`.
+- **Fresh sessions per Track:** `/compact` or start a new session at Track boundaries — `CLAUDE.md`, `ARCHITECTURE.md`, and `docs/phases/` already hold full state.
+
 ## Domain Rules (Bucktracker)
 Summary — full detail and edge cases live in `DECISIONS.md` §3-5.
 
