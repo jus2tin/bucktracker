@@ -3,6 +3,7 @@ module Api.AccountsSpec (spec) where
 import Api.Setup (withTestApp)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import Data.List (isInfixOf)
+import Data.Time (getCurrentTime, showGregorian, utctDay)
 import Network.HTTP.Types (hLocation)
 import Network.Wai.Test (SResponse (simpleBody, simpleHeaders))
 import Test.Hspec
@@ -34,6 +35,18 @@ spec = with withTestApp $ do
       response <- postHtmlForm "/accounts/1/archive" []
       liftIO (bodyContains "Archived" response `shouldBe` True)
       liftIO (bodyContains "Archive<" response `shouldBe` False)
+
+  describe "GET /accounts (balance column)" $
+    it "shows an account's running balance, not just its name/type/status" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking Account"), ("accountType", "checking")]
+      today <- liftIO (showGregorian . utctDay <$> getCurrentTime)
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", today), ("inflowPayee", "Salary"), ("inflowAmount", "123.45")]
+      liftIO (bodyContains "123.45" response `shouldBe` True) -- sanity: the inflow itself was accepted
+      accountsPage <- get "/accounts"
+      liftIO (bodyContains "123.45" accountsPage `shouldBe` True)
 
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody

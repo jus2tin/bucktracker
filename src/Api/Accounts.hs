@@ -17,13 +17,18 @@ import Servant.HTML.Lucid (HTML)
 import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, page)
 import Api.Monad (AppM, withConn)
 import qualified Db.Account as Db
+import qualified Db.Transaction as Db
 import Domain.Account (Account (accId, accName, accType), isArchived)
+import Domain.Budget (accountBalance)
 import Domain.Error (DomainError (EmptyName))
+import Domain.Transaction (Transaction)
 import Domain.Types
   ( AccountId (AccountId)
   , AccountType
+  , Cents
   , accountTypeFromText
   , accountTypeToText
+  , centsValue
   )
 import Web.FormUrlEncoded (FromForm)
 
@@ -47,7 +52,8 @@ accountsServer = listAccountsHandler :<|> createAccountHandler :<|> archiveAccou
 listAccountsHandler :: AppM (Html ())
 listAccountsHandler = do
   accounts <- withConn Db.listAccounts
-  pure (page "Accounts" (accountsContent Nothing accounts))
+  txs <- withConn Db.listAllTransactions
+  pure (page "Accounts" (accountsContent Nothing accounts txs))
 
 createAccountHandler :: NewAccountForm -> AppM (Html ())
 createAccountHandler form = case accountTypeFromText (accountType form) of
@@ -73,13 +79,14 @@ archiveAccountHandler rawId = do
 renderFragment :: Maybe Text -> AppM (Html ())
 renderFragment err = do
   accounts <- withConn Db.listAccounts
-  pure (accountsContent err accounts)
+  txs <- withConn Db.listAllTransactions
+  pure (accountsContent err accounts txs)
 
-accountsContent :: Maybe Text -> [Account] -> Html ()
-accountsContent err accounts = div_ [id_ "accounts-content"] $ do
+accountsContent :: Maybe Text -> [Account] -> [Transaction] -> Html ()
+accountsContent err accounts txs = div_ [id_ "accounts-content"] $ do
   errorBanner err
   newAccountForm
-  accountsTable accounts
+  accountsTable accounts txs
 
 newAccountForm :: Html ()
 newAccountForm =
@@ -91,15 +98,16 @@ newAccountForm =
 accountTypeOption :: AccountType -> Html ()
 accountTypeOption ty = option_ [value_ (accountTypeToText ty)] (toHtml (accountTypeToText ty))
 
-accountsTable :: [Account] -> Html ()
-accountsTable accounts = table_ $ do
-  thead_ (tr_ (mapM_ (th_ . toHtml) (["Name", "Type", "Status", ""] :: [Text])))
-  tbody_ (mapM_ accountRow accounts)
+accountsTable :: [Account] -> [Transaction] -> Html ()
+accountsTable accounts txs = table_ $ do
+  thead_ (tr_ (mapM_ (th_ . toHtml) (["Name", "Type", "Balance", "Status", ""] :: [Text])))
+  tbody_ (mapM_ (accountRow txs) accounts)
 
-accountRow :: Account -> Html ()
-accountRow acc = tr_ $ do
+accountRow :: [Transaction] -> Account -> Html ()
+accountRow txs acc = tr_ $ do
   td_ (toHtml (accName acc))
   td_ (toHtml (accountTypeToText (accType acc)))
+  td_ (toHtml (centsToEuroText (accountBalance (accId acc) txs)))
   td_ (toHtml (statusText (isArchived acc)))
   td_ (archiveButton acc)
   where
@@ -118,3 +126,16 @@ archiveButton acc
 
 accountIdText :: AccountId -> Text
 accountIdText (AccountId i) = Text.pack (show i)
+
+centsToEuroText :: Cents -> Text
+centsToEuroText amt =
+  sign <> Text.pack (show whole) <> "." <> pad2 frac
+  where
+    raw = centsValue amt
+    sign = if raw < 0 then "-" else ""
+    absValue = abs raw
+    whole = absValue `div` 100
+    frac = absValue `mod` 100
+    pad2 n =
+      let s = Text.pack (show n)
+      in if Text.length s < 2 then "0" <> s else s
