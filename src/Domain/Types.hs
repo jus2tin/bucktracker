@@ -38,6 +38,7 @@ module Domain.Types
   , TransactionStatus (..)
   , transactionStatusToText
   , transactionStatusFromText
+  , toggleCleared
   ) where
 
 import Data.Int (Int64)
@@ -180,3 +181,13 @@ transactionStatusFromText "uncleared"  = Just Uncleared
 transactionStatusFromText "cleared"    = Just Cleared
 transactionStatusFromText "reconciled" = Just Reconciled
 transactionStatusFromText _            = Nothing
+
+-- | Toggling a transaction's cleared state from the register:
+-- 'Uncleared' becomes 'Cleared' and back. A 'Reconciled' transaction is
+-- a no-op here — reconciling is a deliberate, account-wide action (see
+-- 'Db.Transaction.reconcileAccount'/'Domain.Budget.clearedBalance'),
+-- not something a single click on one row should be able to undo.
+toggleCleared :: TransactionStatus -> TransactionStatus
+toggleCleared Uncleared  = Cleared
+toggleCleared Cleared    = Uncleared
+toggleCleared Reconciled = Reconciled

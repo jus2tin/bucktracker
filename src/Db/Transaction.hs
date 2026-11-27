@@ -6,6 +6,8 @@ module Db.Transaction
   , listTransactionsForAccount
   , listTransactionsInMonth
   , listAllTransactions
+  , setTransactionCleared
+  , reconcileAccount
   ) where
 
 import Control.Exception (Exception, throwIO)
@@ -41,11 +43,12 @@ import Domain.Types
   , Cents
   , ImportHash
   , TransactionId (TransactionId)
-  , TransactionStatus
+  , TransactionStatus (Cleared, Reconciled)
   , TransferId (TransferId)
   , YearMonth
   , negateCents
   , nextYearMonth
+  , toggleCleared
   , ymMonth
   , ymYear
   )
@@ -295,3 +298,29 @@ listAllTransactions conn = do
       "SELECT id, account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash \
       \FROM transactions ORDER BY date, id"
   traverse (rowToTransaction conn) rows
+
+-- | Flips a transaction between 'Domain.Types.Uncleared' and
+-- 'Domain.Types.Cleared' from the register ('Domain.Types.toggleCleared').
+-- A no-op on an unknown id or an already-'Reconciled' transaction —
+-- reconciling is the deliberate, account-wide action in
+-- 'reconcileAccount', not something a single click on one row should
+-- be able to undo.
+setTransactionCleared :: Connection -> TransactionId -> IO ()
+setTransactionCleared conn txId' = withTransaction conn $ do
+  rows <- query conn "SELECT status FROM transactions WHERE id = ?" (Only txId') :: IO [Only TransactionStatus]
+  case rows of
+    [Only current] ->
+      execute conn "UPDATE transactions SET status = ? WHERE id = ?" (toggleCleared current, txId')
+    _ -> pure ()
+
+-- | The "commit" step of reconciling an account: every 'Cleared'
+-- transaction on it becomes 'Reconciled'. Only ever called once the
+-- caller has already confirmed 'Domain.Budget.clearedBalance' matches
+-- the bank statement ('Api.Accounts') — this function itself doesn't
+-- check that; it's just the write.
+reconcileAccount :: Connection -> AccountId -> IO ()
+reconcileAccount conn aid =
+  execute
+    conn
+    "UPDATE transactions SET status = ? WHERE account_id = ? AND status = ?"
+    (Reconciled, aid, Cleared)

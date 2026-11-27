@@ -36,7 +36,7 @@ import Domain.Category (Category (catId, catName), isArchivedCategory)
 import Domain.Error (DomainError (..))
 import Domain.Transaction
   ( Categorization (Categorized, Inflow, TransferLeg)
-  , Transaction (txCategorization, txDate, txPayee, txStatus)
+  , Transaction (txCategorization, txDate, txId, txPayee, txStatus)
   , TransactionLine (TransactionLine)
   , transactionAmount
   )
@@ -44,7 +44,8 @@ import Domain.Types
   ( AccountId (AccountId)
   , CategoryId (CategoryId)
   , Cents
-  , TransactionStatus (Uncleared)
+  , TransactionId (TransactionId)
+  , TransactionStatus (Reconciled, Uncleared)
   , centsValue
   , cents
   , dayToYearMonth
@@ -58,6 +59,7 @@ type TransactionsApi =
     :<|> "transactions" :> "inflow" :> ReqBody '[FormUrlEncoded] NewInflowForm :> Post '[HTML] (Html ())
     :<|> "transactions" :> "spending" :> ReqBody '[FormUrlEncoded] NewSpendingForm :> Post '[HTML] (Html ())
     :<|> "transactions" :> "transfer" :> ReqBody '[FormUrlEncoded] NewTransferForm :> Post '[HTML] (Html ())
+    :<|> "transactions" :> Capture "id" Int64 :> "clear" :> Post '[HTML] (Html ())
 
 -- | Each form's fields are prefixed so the three forms on one page
 -- never collide on a shared @name@ attribute (they share the page, not
@@ -96,6 +98,7 @@ transactionsServer =
     :<|> createInflowHandler
     :<|> createSpendingHandler
     :<|> createTransferHandler
+    :<|> toggleClearedHandler
 
 listTransactionsHandler :: AppM (Html ())
 listTransactionsHandler = renderFragment Nothing
@@ -164,6 +167,16 @@ createTransferHandler form = case parseAccountId (transferFromAccountId form) of
                   withError "Cannot transfer between an on-budget and a tracking account."
                 Left _ -> withError "Could not create transfer."
                 Right _ -> renderFragment Nothing
+
+-- | Toggles one transaction between Uncleared and Cleared from the
+-- register — the first step of reconciling (the second, account-wide
+-- step lives on the Accounts page, see Api.Accounts). A no-op on an
+-- unknown id or an already-Reconciled transaction
+-- (Domain.Types.toggleCleared).
+toggleClearedHandler :: Int64 -> AppM (Html ())
+toggleClearedHandler rawId = do
+  withConn (\conn -> Db.setTransactionCleared conn (TransactionId rawId))
+  renderFragment Nothing
 
 defaultStatus :: TransactionStatus
 defaultStatus = Uncleared
@@ -237,7 +250,7 @@ newTransferForm accounts =
 
 transactionsTable :: [Account] -> [Category] -> [Transaction] -> Html ()
 transactionsTable accounts categories transactions = table_ $ do
-  thead_ (tr_ (mapM_ (th_ . toHtml) (["Date", "Payee", "Category", "Amount", "Status"] :: [Text])))
+  thead_ (tr_ (mapM_ (th_ . toHtml) (["Date", "Payee", "Category", "Amount", "Status", ""] :: [Text])))
   tbody_ (mapM_ (transactionRow accounts categories) transactions)
 
 transactionRow :: [Account] -> [Category] -> Transaction -> Html ()
@@ -247,6 +260,26 @@ transactionRow accounts categories tx = tr_ $ do
   td_ (toHtml (categorizationText accounts categories (txCategorization tx)))
   td_ (toHtml (centsToEuroText (transactionAmount tx)))
   td_ (toHtml (transactionStatusToText (txStatus tx)))
+  td_ (clearButton tx)
+
+-- | Lets the register mark a transaction as seen on the bank statement
+-- (Uncleared <-> Cleared, see Domain.Types.toggleCleared) — the first
+-- step toward reconciling. No button once a transaction is
+-- Reconciled: that status only changes via Api.Accounts' account-wide
+-- reconcile action, never a single click here.
+clearButton :: Transaction -> Html ()
+clearButton tx
+  | txStatus tx == Reconciled = mempty
+  | otherwise =
+      button_
+        [ hxPost_ ("/transactions/" <> transactionIdText (txId tx) <> "/clear")
+        , hxTarget_ "#transactions-content"
+        , hxSwap_ "outerHTML"
+        ]
+        (if txStatus tx == Uncleared then "Clear" else "Unclear")
+
+transactionIdText :: TransactionId -> Text
+transactionIdText (TransactionId i) = Text.pack (show i)
 
 categorizationText :: [Account] -> [Category] -> Categorization -> Text
 categorizationText _ categories (Categorized ls) =

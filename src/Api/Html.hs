@@ -8,6 +8,7 @@
 module Api.Html
   ( page
   , errorBanner
+  , successBanner
   , hxPost_
   , hxTarget_
   , hxSwap_
@@ -40,6 +41,13 @@ errorBanner :: Maybe Text -> Html ()
 errorBanner Nothing = mempty
 errorBanner (Just msg) = div_ [class_ "error"] (toHtml msg)
 
+-- | Positive confirmation (e.g. "account reconciled") — same shape as
+-- 'errorBanner', styled differently so the two are never confused at a
+-- glance.
+successBanner :: Maybe Text -> Html ()
+successBanner Nothing = mempty
+successBanner (Just msg) = div_ [class_ "success"] (toHtml msg)
+
 hxPost_ :: Text -> Attribute
 hxPost_ = makeAttribute "hx-post"
 
@@ -54,6 +62,7 @@ pageStyle =
   "body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 48rem; } \
   \nav { margin-bottom: 1.5rem; } \
   \.error { color: #a00; margin-bottom: 1rem; } \
+  \.success { color: #070; margin-bottom: 1rem; } \
   \table { border-collapse: collapse; width: 100%; margin-top: 1rem; } \
   \td, th { padding: 0.35rem 0.6rem; border: 1px solid #ccc; text-align: left; } \
   \form { display: flex; gap: 0.5rem; align-items: center; }"

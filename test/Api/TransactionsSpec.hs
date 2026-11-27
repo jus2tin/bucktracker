@@ -130,5 +130,24 @@ spec = with withTestApp $ do
           [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
       liftIO (bodyContains "tracking account" response `shouldBe` True)
 
+  describe "POST /transactions/:id/clear" $
+    it "toggles a transaction between Uncleared and Cleared (the first step of reconciling)" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      beforeToggle <- get "/transactions"
+      liftIO (bodyContains "uncleared" beforeToggle `shouldBe` True)
+
+      -- "uncleared" is a superstring of "cleared", so absence of
+      -- "uncleared" (not presence of "cleared") is the real assertion.
+      afterFirstToggle <- postHtmlForm "/transactions/1/clear" []
+      liftIO (bodyContains "uncleared" afterFirstToggle `shouldBe` False)
+
+      afterSecondToggle <- postHtmlForm "/transactions/1/clear" []
+      liftIO (bodyContains "uncleared" afterSecondToggle `shouldBe` True)
+
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody

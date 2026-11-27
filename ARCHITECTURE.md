@@ -251,7 +251,16 @@ your side but the bank hasn't posted yet, like a pending card charge).
 
 There's deliberately no separate "Reconciliation" type or table —
 reconciling is just `clearedBalance aid txs == bankStatementBalance`,
-decided by whoever's looking at the two numbers.
+decided by whoever's looking at the two numbers. In the UI this is two
+small, separate steps: the Transactions page has a "Clear"/"Unclear"
+button per row (`Domain.Types.toggleCleared`) so you can mark what the
+bank has actually shown you so far; the Accounts page then has a
+one-field "Reconcile" form per account that compares `clearedBalance`
+to whatever you type in. On a match, `Db.Transaction.reconcileAccount`
+locks every `Cleared` transaction on that account in as `Reconciled`;
+on a mismatch, nothing is written at all — you get both numbers back
+to go find the missing, duplicate, or still-uncleared transaction
+yourself.
 
 ## Where do I change X?
 
