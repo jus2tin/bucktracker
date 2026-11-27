@@ -235,7 +235,7 @@ not individually re-derived.
   because `applyMigration` runs it inside a transaction (harmless today
   only because `openConfigured`/`Db.Setup` already set it per-connection
   beforehand).
-- **H-4.** *(confirmed, reproduced)* `Db.Migrations.applyMigration`
+- **H-4.** *(Fixed 2026-11-27 — see §9.)* *(confirmed, reproduced)* `Db.Migrations.applyMigration`
   reads `.sql` files with `Data.Text.IO.readFile`, which decodes using
   the system locale encoding, not UTF-8. On this machine that's
   `CP850`; reading the "§" in `migrations/0001_initial.sql`'s own header
@@ -244,13 +244,15 @@ not individually re-derived.
   future migration with meaningful non-ASCII content. Same bug family
   as the stdout encoding crash already fixed in `Main.hs` — that fix
   didn't cover file reads.
-- **H-5.** `archiveAccount`/`archiveCategory` don't check for a zero
-  balance, don't block new transactions/assignments against an archived
-  entity, and `archiveCategoryGroup` doesn't cascade to its categories.
-  Also, there's no multi-month rollover orchestrator in `Domain.Budget`
-  yet (something that folds `nextCarriedIn`/`rolloverRtaAdjustment`
+- **H-5.** *(Rollover-orchestrator half fixed 2026-11-27 — see §9; the
+  archive/cascade half below is still open.)* `archiveAccount`/
+  `archiveCategory` don't check for a zero balance, don't block new
+  transactions/assignments against an archived entity, and
+  `archiveCategoryGroup` doesn't cascade to its categories. ~~Also,
+  there's no multi-month rollover orchestrator in `Domain.Budget` yet
+  (something that folds `nextCarriedIn`/`rolloverRtaAdjustment`
   month-to-month) — `budgetBalancesAccounts` is only ever exercised
-  single-month, with `carriedIn = zeroCents`, in `BudgetSpec` today.
+  single-month, with `carriedIn = zeroCents`, in `BudgetSpec` today.~~
 - **H-6.** `Db.Backup.backupTo` copies in one `backupStep (-1)` call,
   which (for a large db) holds the lock for the whole backup rather than
   yielding between chunks — in tension with its own "doesn't lock out
@@ -295,13 +297,13 @@ not individually re-derived.
   explicitly-empty value passes config parsing. (The specific crash
   claimed for the empty-path case was checked and is wrong — see above —
   but the missing validation itself is real.)
-- **M-10.** `Account`/`CategoryGroup`/`Category` export their raw data
+- ~~**M-10.** `Account`/`CategoryGroup`/`Category` export their raw data
   constructors, so code outside `Domain` can build one bypassing
   `mkAccount`/`mkCategory` (unlike `YearMonth`, which hides its
   constructor on purpose). Also, `DECISIONS.md` §3 names reconciliation
   as in-scope for v0.1, but `Domain.Budget` only has `accountBalance`
   (all statuses combined) — no `clearedBalance`/reconciliation function
-  exists yet.
+  exists yet.~~ *(Fixed 2026-11-27 — see §9.)*
 - **L-2.** The "Categories" nav link in `Api.Html` points at `/categories`,
   which isn't mounted yet — a dead link until that page exists (next on
   the roadmap anyway).
@@ -334,3 +336,111 @@ history; the unused-dependency/orphan-instance warnings — not a finding,
 an already-documented deliberate Phase 3 tradeoff (§1, §6, and the
 comments in `package.yaml`); the missing WAL-sidecar `.gitignore`
 patterns — fixed directly instead of deferred.
+
+## 9. Product-owner prioritization (2026-11-27): backlog items pulled forward
+
+Product direction (reviewed against this file and the actual code, same
+discipline as §8): keep v0.1's scope exactly as set in §4 — no
+forecasting yet — but pull four specific §8 backlog items forward ahead
+of finishing the Budget UI, "so real data entry doesn't hit preventable
+bugs". All four are now fixed; all 82 tests pass (`stack test`).
+
+- **H-4 (UTF-8 migration reading).** `Db.Migrations.applyMigration` now
+  reads each migration file as raw bytes (`Data.ByteString.readFile`)
+  and decodes them explicitly with `decodeUtf8'`, instead of
+  `Data.Text.IO.readFile`'s locale-dependent decoding. A bad decode
+  throws a new typed `InvalidMigrationEncoding` exception (same pattern
+  as `Db.Transaction.CorruptRow`) rather than silently mis-decoding.
+  Both `applyMigration` and the exception are now exported so
+  `Db.MigrationsSpec` can regression-test the encoding directly: a
+  file with multi-byte UTF-8 content applies cleanly, and a file that
+  isn't valid UTF-8 is rejected instead of silently accepted.
+- **M-10a (sealed constructors).** `Account`/`CategoryGroup`/`Category`
+  no longer export their raw data constructors — `Domain.Account`/
+  `Domain.Category` now export the types and their field accessors
+  separately (the `YearMonth` pattern). The only ways to build one from
+  outside are `mkAccount`/`mkCategoryGroup`/`mkCategory` (validating) or
+  the new `unsafeReconstructAccount`/`unsafeReconstructCategoryGroup`/
+  `unsafeReconstructCategory` (deliberately named for grep-ability: for
+  `Db.Account`/`Db.Category`'s `FromRow` instances and insert functions
+  to rebuild a value from data that's already valid, without
+  re-validating a name on every read). `Domain.Budget`/`Domain.Gen` were
+  updated to import explicit field accessors instead of the now-gone
+  wildcard constructor import.
+- **M-10b (reconciliation).** `Domain.Budget.clearedBalance` sums only
+  `Cleared`/`Reconciled` transactions for an account (excluding
+  `Uncleared`), matching the "pure comparison" reconciliation design
+  already described in §3 — the caller still does
+  `clearedBalance aid txs == bankStatementBalance` itself; this
+  deliberately isn't a separate domain type. Two new QuickCheck
+  properties in `BudgetSpec`.
+- **H-5 (multi-month rollover orchestrator).** `Domain.Budget` gained
+  `MonthlyBudget` and `rolloverMonths`, which fold the month rollover
+  (`nextCarriedIn` per category, plus `rolloverRtaAdjustment` into the
+  next month's Ready-to-Assign carry-in) across a whole ascending
+  sequence of months, instead of every month starting at `zeroCents`.
+  `Domain.Gen` gained `MultiMonthWorld`/`genMultiMonthWorld` (several
+  consecutive months, same accounts/categories throughout), and
+  `BudgetSpec` gained a property test asserting invariant 1
+  (`budgetBalancesAccounts`'s equation) holds at *every* month in the
+  sequence, not just a single isolated one.
+  - **Also wired into `Api.Budget`**, not just left as unused Domain
+    code: the Budget page now reads the *entire* assignment/transaction
+    history (`Db.Assignment.listAllAssignments`,
+    `Db.Transaction.listAllTransactions`, both new) and folds
+    `rolloverMonths` from the earliest month with any activity through
+    the current one, picking out the current month's `MonthlyBudget`
+    for display. The page still has no month picker (unchanged
+    simplification, consistent with `Api.Transactions`), but its carry
+    and Ready-to-Assign figures are no longer always zero going into a
+    new month.
+  - The archive/zero-balance/cascade half of the original H-5 entry is
+    **not** part of this fix and remains open (see §8 above).
+
+## 10. Post-v0.1 roadmap: scheduled transactions & projections
+
+Confirmed as a core v0.2+ requirement (product direction, 2026-11-27):
+forecasting and scheduled bills, promoted out of the generic "recurring
+transactions" line in §4's out-of-scope list into an explicit design,
+decided now so v0.1's ledger isn't built in a way that has to be undone
+later.
+
+- **The real ledger stays strictly historical/present-tense.** No
+  future or hypothetical row is ever inserted into `transactions`,
+  `transaction_lines`, or `assignments` — a forecast is a *view*, never
+  a write. All 5 invariants in §5 keep holding over actual cash exactly
+  as they do today; nothing about `Domain.Transaction`/`Domain.Budget`
+  changes to accommodate this.
+- **Recurrence gets its own storage, separate from the ledger.**
+  Scheduled bills, recurring expenses and expected income live in a new
+  `scheduled_items` table (recurrence rule + category/account + amount
+  template), not in `transactions`. A scheduled item is a *template*;
+  it only ever produces a real transaction when the user actually
+  confirms/enters one (manually, or — much later — via a "confirm
+  today's scheduled items" action). It never auto-inserts into the real
+  ledger on its own.
+- **Projections are a pure simulation, not a new persisted state.**
+  `Domain.Projection` (new module, same purity rules as the rest of
+  `Domain/`: no `IO`, no DB) expands each `ScheduledItem`'s recurrence
+  rule into synthetic future events and folds them forward month by
+  month, reusing `rolloverCategoryMonth`/`available` (§3, now also
+  `rolloverMonths`, §9) exactly as the real ledger does — a projected
+  month is computed with the *same* rollover function as a real one,
+  just fed synthetic activity instead of real transactions. Shape:
+  `project :: World -> [ScheduledItem] -> YearMonth -> ProjectedWorld`,
+  where `World` is the real present-day state (accounts, categories,
+  assignments, transactions — closely related to `Domain.Gen.World`,
+  though that's currently test-only) and `ProjectedWorld` carries the
+  simulated `MonthlyBudget`s from the current month through the target
+  month. Never touches the database.
+- **UI: a separate `/forecast` page**, not a mode of `/budget`. Shows
+  projected category balances, a cash-flow runway, and a savings
+  trajectory, built from `Domain.Projection`'s pure output. `/budget`
+  itself stays exactly as strict as it is today — no scheduled item or
+  projected number ever appears there, so the envelope page a user
+  budgets from never mixes real and hypothetical money.
+- **Not yet decided** (left for when this phase actually starts):
+  the exact recurrence-rule representation (RFC 5545-style vs. a
+  simpler fixed set of patterns), whether `ScheduledItem` needs its own
+  soft-delete/pause state, and how far into the future `/forecast`
+  defaults to projecting.
