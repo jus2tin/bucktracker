@@ -49,3 +49,10 @@ spec = do
         forAll genYearMonth $ \ym ->
           forAll (genDayIn ym) $ \day ->
             dayToYearMonth day === ym
+
+  describe "toggleCleared" $ do
+    it "is its own inverse" $
+      property $ \s -> toggleCleared (toggleCleared s) == s
+
+    it "never changes a Reconciled status (reconciling is an account-wide action, not a per-row toggle)" $
+      toggleCleared Reconciled `shouldBe` Reconciled

@@ -36,6 +36,9 @@ including known v0.1 limitations and what's deliberately still open.
 - **Language extensions:** `language: GHC2021` + `default-extensions`: `OverloadedStrings`, `StrictData`, `DeriveGeneric`, `DataKinds`, `TypeOperators`, `DerivingStrategies`, `DerivingVia`, `DeriveAnyClass` (in `package.yaml`).
 - **Compiler flags:** `-Wall -Wmissing-export-lists -Wunused-packages` locally; `-Werror` only in CI (see `DECISIONS.md` §6 for why that isn't on locally yet).
 - **Error handling:** Use `ExceptT` / `ServantError` only in the API layer; in the domain, pure `Either DomainError a` (see `src/Domain/Error.hs`), or, where a value can never be invalid, a plain total function.
+- **Documentation Standard:**
+  - Every exported function in `src/Domain/` and `src/Db/` gets a Haddock comment (`-- |`) explaining *why* it exists and any invariant it upholds — not what it does (the type signature + name already say that). See `Domain.Budget.rolloverCategoryMonth`/`clearedBalance` or `Db.Migrations.applyMigration` for the expected level of detail.
+  - Whenever a change adds or changes a page/route, a domain rule, or a database table, update `ARCHITECTURE.md` **in the same commit** — never as a follow-up. A change whose own commit doesn't need an `ARCHITECTURE.md` update (a bug fix, a refactor, a test) can skip this.
 
 ## Build & Test Commands
 - Build: `stack build --fast`

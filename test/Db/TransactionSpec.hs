@@ -12,6 +12,8 @@ import Db.Transaction
   , insertTransfer
   , listTransactionsForAccount
   , listTransactionsInMonth
+  , reconcileAccount
+  , setTransactionCleared
   )
 import Domain.Account (Account (accId))
 import Domain.Category (Category (catId), CategoryGroup (cgId))
@@ -24,13 +26,13 @@ import Domain.Error
   )
 import Domain.Transaction
   ( Categorization (Categorized, Inflow)
-  , Transaction (txCategorization, txId)
+  , Transaction (txCategorization, txId, txStatus)
   , TransactionLine (TransactionLine)
   , transactionAmount
   )
 import Domain.Types
   ( AccountType (Checking, Tracking)
-  , TransactionStatus (Uncleared)
+  , TransactionStatus (Cleared, Reconciled, Uncleared)
   , cents
   , mkYearMonth
   , zeroCents
@@ -107,3 +109,41 @@ spec = around withTestDb $
       february <- expectRight (mkYearMonth 2026 2)
       results <- listTransactionsInMonth conn february
       map txId results `shouldBe` [txId inMonth1, txId inMonth2]
+
+    it "setTransactionCleared toggles Uncleared <-> Cleared, and is a no-op once Reconciled" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 100) Nothing
+      setTransactionCleared conn (txId tx)
+      afterFirstToggle <- getTransaction conn (txId tx)
+      fmap txStatus afterFirstToggle `shouldBe` Just Cleared
+
+      setTransactionCleared conn (txId tx)
+      afterSecondToggle <- getTransaction conn (txId tx)
+      fmap txStatus afterSecondToggle `shouldBe` Just Uncleared
+
+      setTransactionCleared conn (txId tx) -- back to Cleared ...
+      reconcileAccount conn (accId acc) -- ... and reconciled
+      afterReconcile <- getTransaction conn (txId tx)
+      fmap txStatus afterReconcile `shouldBe` Just Reconciled
+
+      setTransactionCleared conn (txId tx) -- a Reconciled transaction can't be toggled
+      afterToggleAttempt <- getTransaction conn (txId tx)
+      fmap txStatus afterToggleAttempt `shouldBe` Just Reconciled
+
+    it "reconcileAccount only touches Cleared transactions on that account" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      otherAcc <- insertAccount conn "Savings Account" Checking >>= expectRight
+      cleared <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Cleared" Uncleared (cents 100) Nothing
+      stillUncleared <- insertInflow conn (accId acc) (fromGregorian 2026 1 2) "Still uncleared" Uncleared (cents 200) Nothing
+      otherAccCleared <- insertInflow conn (accId otherAcc) (fromGregorian 2026 1 3) "Elsewhere" Uncleared (cents 300) Nothing
+      setTransactionCleared conn (txId cleared)
+      setTransactionCleared conn (txId otherAccCleared)
+
+      reconcileAccount conn (accId acc)
+
+      reconciledResult <- getTransaction conn (txId cleared)
+      stillUnclearedResult <- getTransaction conn (txId stillUncleared)
+      otherAccResult <- getTransaction conn (txId otherAccCleared)
+      fmap txStatus reconciledResult `shouldBe` Just Reconciled
+      fmap txStatus stillUnclearedResult `shouldBe` Just Uncleared
+      fmap txStatus otherAccResult `shouldBe` Just Cleared -- untouched: different account
