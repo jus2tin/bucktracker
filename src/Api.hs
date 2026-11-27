@@ -10,6 +10,7 @@ import Servant
 import Servant.HTML.Lucid (HTML)
 
 import Api.Accounts (AccountsApi, accountsServer)
+import Api.Budget (BudgetApi, budgetServer)
 import Api.Categories (CategoriesApi, categoriesServer)
 import Api.Monad (AppEnv, AppM, runAppM)
 import Api.Transactions (TransactionsApi, transactionsServer)
@@ -19,17 +20,22 @@ type RootApi =
     :<|> AccountsApi
     :<|> CategoriesApi
     :<|> TransactionsApi
+    :<|> BudgetApi
 
 rootApi :: Proxy RootApi
 rootApi = Proxy
 
 server :: ServerT RootApi AppM
-server = rootHandler :<|> accountsServer :<|> categoriesServer :<|> transactionsServer
+server =
+  rootHandler
+    :<|> accountsServer
+    :<|> categoriesServer
+    :<|> transactionsServer
+    :<|> budgetServer
 
--- | "/" redirects to "/accounts" — there's no real dashboard yet (will
--- come with the budget page, see DECISIONS.md §4).
+-- | "/" redirects to "/budget", the closest thing to a dashboard today.
 rootHandler :: AppM (Html ())
-rootHandler = throwError err303 {errHeaders = [("Location", "/accounts")]}
+rootHandler = throwError err303 {errHeaders = [("Location", "/budget")]}
 
 application :: AppEnv -> Application
 application env = serve rootApi (hoistServer rootApi (runAppM env) server)

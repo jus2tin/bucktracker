@@ -11,9 +11,9 @@ import Test.Hspec.Wai
 spec :: Spec
 spec = with withTestApp $ do
   describe "GET /" $
-    it "redirects to /accounts" $ do
+    it "redirects to /budget" $ do
       response <- get "/"
-      liftIO (response `shouldSatisfy` ((== Just "/accounts") . lookup hLocation . simpleHeaders))
+      liftIO (response `shouldSatisfy` ((== Just "/budget") . lookup hLocation . simpleHeaders))
 
   describe "GET /accounts" $
     it "shows an empty table as long as there are no accounts" $

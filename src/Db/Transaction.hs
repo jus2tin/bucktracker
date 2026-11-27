@@ -5,6 +5,7 @@ module Db.Transaction
   , getTransaction
   , listTransactionsForAccount
   , listTransactionsInMonth
+  , listAllTransactions
   ) where
 
 import Control.Exception (Exception, throwIO)
@@ -21,6 +22,7 @@ import Database.SQLite.Simple
   , field
   , lastInsertRowId
   , query
+  , query_
   , withTransaction
   )
 import Db.Account (getAccount)
@@ -279,3 +281,17 @@ listTransactionsInMonth conn ym = do
     firstDay = fromGregorian (fromIntegral (ymYear ym)) (ymMonth ym) 1
     nextYm = nextYearMonth ym
     firstDayNextMonth = fromGregorian (fromIntegral (ymYear nextYm)) (ymMonth nextYm) 1
+
+-- | Every transaction ever recorded, across all accounts and months —
+-- unlike 'listTransactionsInMonth', deliberately not restricted to one
+-- month. Needed to fold the multi-month rollover
+-- ('Domain.Budget.rolloverMonths') from the first month with any
+-- activity up through the current one (DECISIONS.md §8, H-5).
+listAllTransactions :: Connection -> IO [Transaction]
+listAllTransactions conn = do
+  rows <-
+    query_
+      conn
+      "SELECT id, account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash \
+      \FROM transactions ORDER BY date, id"
+  traverse (rowToTransaction conn) rows
