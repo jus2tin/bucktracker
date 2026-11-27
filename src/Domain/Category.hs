@@ -1,8 +1,17 @@
 module Domain.Category
-  ( CategoryGroup (..)
+  ( CategoryGroup
+  , cgId
+  , cgName
+  , cgArchivedAt
   , mkCategoryGroup
-  , Category (..)
+  , unsafeReconstructCategoryGroup
+  , Category
+  , catId
+  , catGroupId
+  , catName
+  , catArchivedAt
   , mkCategory
+  , unsafeReconstructCategory
   , isArchivedGroup
   , isArchivedCategory
   ) where
@@ -24,6 +33,12 @@ mkCategoryGroup :: CategoryGroupId -> Text -> Either DomainError CategoryGroup
 mkCategoryGroup gid name =
   (\n -> CategoryGroup gid n Nothing) <$> nonEmptyName "category group" name
 
+-- | Rebuilds a 'CategoryGroup' from data that's already valid — see
+-- 'Domain.Account.unsafeReconstructAccount' for why this exists instead
+-- of exporting the raw constructor (DECISIONS.md §8, M-10).
+unsafeReconstructCategoryGroup :: CategoryGroupId -> Text -> Maybe UTCTime -> CategoryGroup
+unsafeReconstructCategoryGroup = CategoryGroup
+
 isArchivedGroup :: CategoryGroup -> Bool
 isArchivedGroup cg = case cgArchivedAt cg of
   Just _  -> True
@@ -41,6 +56,12 @@ data Category = Category
 mkCategory :: CategoryId -> CategoryGroupId -> Text -> Either DomainError Category
 mkCategory cid gid name =
   (\n -> Category cid gid n Nothing) <$> nonEmptyName "category" name
+
+-- | Rebuilds a 'Category' from data that's already valid — see
+-- 'Domain.Account.unsafeReconstructAccount' for why this exists instead
+-- of exporting the raw constructor (DECISIONS.md §8, M-10).
+unsafeReconstructCategory :: CategoryId -> CategoryGroupId -> Text -> Maybe UTCTime -> Category
+unsafeReconstructCategory = Category
 
 isArchivedCategory :: Category -> Bool
 isArchivedCategory cat = case catArchivedAt cat of

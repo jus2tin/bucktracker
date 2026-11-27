@@ -1,6 +1,11 @@
 module Domain.Account
-  ( Account (..)
+  ( Account
+  , accId
+  , accName
+  , accType
+  , accArchivedAt
   , mkAccount
+  , unsafeReconstructAccount
   , isOnBudget
   , isArchived
   , sameBudgetStatus
@@ -30,6 +35,17 @@ data Account = Account
 mkAccount :: AccountId -> Text -> AccountType -> Either DomainError Account
 mkAccount aid name ty =
   (\n -> Account aid n ty Nothing) <$> nonEmptyName "account" name
+
+-- | Rebuilds an 'Account' from data that's already valid — a row read
+-- back from storage, which only exists because 'mkAccount'/'nonEmptyName'
+-- already validated it once at insert time. The ordinary data
+-- constructor is deliberately not exported (DECISIONS.md §8, M-10), so
+-- this is the one sanctioned way for 'Db.Account' to turn a row back
+-- into an 'Account' without re-running validation on every read; it is
+-- not a second smart constructor, and any other caller is responsible
+-- for the invariant itself.
+unsafeReconstructAccount :: AccountId -> Text -> AccountType -> Maybe UTCTime -> Account
+unsafeReconstructAccount = Account
 
 isOnBudget :: Account -> Bool
 isOnBudget = isOnBudgetType . accType

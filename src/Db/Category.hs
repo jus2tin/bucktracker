@@ -21,16 +21,21 @@ import Database.SQLite.Simple
   , query_
   )
 import Db.Field ()
-import Domain.Category (Category (..), CategoryGroup (..))
+import Domain.Category
+  ( Category
+  , CategoryGroup
+  , unsafeReconstructCategory
+  , unsafeReconstructCategoryGroup
+  )
 import Domain.Error (DomainError)
 import Domain.Types (CategoryGroupId (..), CategoryId (..))
 import Domain.Validation (nonEmptyName)
 
 instance FromRow CategoryGroup where
-  fromRow = CategoryGroup <$> field <*> field <*> field
+  fromRow = unsafeReconstructCategoryGroup <$> field <*> field <*> field
 
 instance FromRow Category where
-  fromRow = Category <$> field <*> field <*> field <*> field
+  fromRow = unsafeReconstructCategory <$> field <*> field <*> field <*> field
 
 insertCategoryGroup :: Connection -> Text -> IO (Either DomainError CategoryGroup)
 insertCategoryGroup conn name = case nonEmptyName "category group" name of
@@ -38,7 +43,7 @@ insertCategoryGroup conn name = case nonEmptyName "category group" name of
   Right validName -> do
     execute conn "INSERT INTO category_groups (name, archived_at) VALUES (?, NULL)" (Only validName)
     rowId <- lastInsertRowId conn
-    pure (Right (CategoryGroup (CategoryGroupId rowId) validName Nothing))
+    pure (Right (unsafeReconstructCategoryGroup (CategoryGroupId rowId) validName Nothing))
 
 listCategoryGroups :: Connection -> IO [CategoryGroup]
 listCategoryGroups conn =
@@ -58,7 +63,7 @@ insertCategory conn gid name = case nonEmptyName "category" name of
       "INSERT INTO categories (group_id, name, archived_at) VALUES (?, ?, NULL)"
       (gid, validName)
     rowId <- lastInsertRowId conn
-    pure (Right (Category (CategoryId rowId) gid validName Nothing))
+    pure (Right (unsafeReconstructCategory (CategoryId rowId) gid validName Nothing))
 
 listCategories :: Connection -> IO [Category]
 listCategories conn =

@@ -3,7 +3,7 @@ module Domain.BudgetSpec (spec) where
 import Domain.Budget
 import Domain.Category (catId)
 import Domain.Gen
-import Domain.Transaction (transactionAmount, txAccount)
+import Domain.Transaction (transactionAmount, txAccount, txDate, txStatus)
 import Domain.Types
 import Test.Hspec
 import Test.QuickCheck
@@ -39,6 +39,15 @@ spec = do
           accountBalance (txAccount tx) [tx] == transactionAmount tx
             && accountBalance otherAcc [tx] == zeroCents
 
+  describe "clearedBalance (reconciliation: only cleared/reconciled activity counts)" $ do
+    it "equals accountBalance restricted to non-Uncleared transactions" $
+      property $ \aid txs ->
+        clearedBalance aid txs == accountBalance aid (filter ((/= Uncleared) . txStatus) txs)
+
+    it "ignores an Uncleared transaction entirely" $
+      property $ \aid tx ->
+        clearedBalance aid [tx { txStatus = Uncleared, txAccount = aid }] == zeroCents
+
   describe "budgetBalancesAccounts (invariant 1: the ledger balances)" $
     it "on-budget account balances == category balances + Ready to Assign" $
       forAll genWorld $ \w ->
@@ -48,3 +57,15 @@ spec = do
               ]
             rta = readyToAssign zeroCents (wAccounts w) (wMonth w) (wAssignments w) (wTransactions w)
         in budgetBalancesAccounts (wAccounts w) categoryMonths rta (wTransactions w)
+
+  describe "rolloverMonths (multi-month regression for invariant 1, DECISIONS.md §8 H-5)" $
+    it "balances at every month in the sequence, not just the first" $
+      forAll genMultiMonthWorld $ \w ->
+        let categoryIds = map catId (mmwCategories w)
+            monthlyBudgets =
+              rolloverMonths (mmwAccounts w) categoryIds (mmwMonths w) (mmwAssignments w) (mmwTransactions w)
+            balancesAt mb =
+              let txsUpTo = filter ((<= mbMonth mb) . dayToYearMonth . txDate) (mmwTransactions w)
+              in onBudgetBalanceTotal (mmwAccounts w) txsUpTo
+                   == mconcat (map available (mbCategoryMonths mb)) <> mbReadyToAssign mb
+        in conjoin (map balancesAt monthlyBudgets)
