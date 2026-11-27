@@ -41,3 +41,7 @@ you set neither.
 - **[`CLAUDE.md`](CLAUDE.md)** — the coding standards and conventions
   this codebase holds itself to (total functions only, type-safe IDs
   and money, where each kind of code belongs).
+- **[`docs/`](docs/README.md)** — project governance and paper trail
+  (Product Owner / Architect / Developer workflow, adversarial milestone
+  reviews in `docs/reviews/`, step-by-step phase plans in `docs/phases/`,
+  and developer handoff logs in `docs/handoffs/`).

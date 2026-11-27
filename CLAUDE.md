@@ -29,6 +29,10 @@ including known v0.1 limitations and what's deliberately still open.
 - `src/Domain/`: Pure business logic, domain types, validation and calculations (no `IO` or DB calls).
 - `src/Db/`: Database queries and schema definitions.
 - `test/`: `hspec` + `QuickCheck` tests (focused on domain logic and budget invariants), via `hspec-discover`.
+- `docs/`: Project collaboration paper trail (see `docs/README.md` for the Product Owner / Architect / Developer workflow):
+  - `docs/phases/`: Step-by-step implementation plans and exit gates for the active phase.
+  - `docs/reviews/`: Immutable adversarial milestone reviews from the Architect.
+  - `docs/handoffs/`: Developer milestone completion and triage notes (use `docs/handoffs/TEMPLATE.md`).
 
 ## Coding Standards (Strict)
 - **Total functions only:** NEVER use `head`, `tail`, `fromJust`, `read`, or `error` in production code. Use pattern matching, `Maybe`, `Either`, or `NonEmpty`.
