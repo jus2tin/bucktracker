@@ -18,6 +18,7 @@ import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
+import Database.SQLite.Simple (Connection)
 import GHC.Generics (Generic)
 import Lucid
 import Lucid.Base (makeAttribute)
@@ -43,6 +44,7 @@ import qualified Db.Account as Db
 import qualified Db.Assignment as Db
 import qualified Db.Category as Db
 import qualified Db.Transaction as Db
+import Db.Tx (withReadSnapshot)
 import Domain.Budget
   ( CategoryMonth (cmActivity, cmAssigned, cmCarriedIn, cmCategory)
   , MonthlyBudget (..)
@@ -87,10 +89,15 @@ data NewAssignmentForm = NewAssignmentForm
 budgetServer :: ServerT BudgetApi AppM
 budgetServer = listBudgetHandler :<|> assignHandler
 
+-- | Exactly one pool checkout per request (Track B §1.4): every read
+-- this handler needs — resolving @?month=@ touches no database at all,
+-- and 'renderFragment' folds its own several reads into one
+-- 'withReadSnapshot' — happens on the single 'Connection' 'withConn'
+-- borrows here, never a second checkout partway through.
 listBudgetHandler :: Maybe Text -> AppM (Html ())
-listBudgetHandler monthParam = do
+listBudgetHandler monthParam = withConn $ \conn -> do
   ym <- resolveViewedMonth monthParam
-  renderFragment Nothing ym Nothing
+  renderFragment conn Nothing ym Nothing
 
 -- | Assigning is signed on purpose (DECISIONS.md §12, Architect review
 -- S-2): once money has rolled over into a category from a previous
@@ -99,38 +106,46 @@ listBudgetHandler monthParam = do
 -- carried-in €50) — 'Domain.Budget.available' already handles that
 -- arithmetic correctly, the old unsigned-only parser was the only
 -- thing stopping it from ever being reachable.
+--
+-- Single pool checkout (Track B §1.4): the validation read
+-- ('Db.listCategories'), the write ('Db.setAssignment'), and the
+-- final re-render all share the one 'Connection' 'withConn' borrows.
 assignHandler :: Maybe Text -> NewAssignmentForm -> AppM (Html ())
-assignHandler hx form = do
+assignHandler hx form = withConn $ \conn -> do
   ym <- resolveViewedMonth (Just (assignMonth form))
   case parseCategoryId (assignCategoryId form) of
-    Nothing -> withError hx ym "Unknown category."
+    Nothing -> withError conn hx ym "Unknown category."
     Just cid -> case parseSignedEuros (assignAmount form) of
-      Nothing -> withError hx ym "Invalid amount."
+      Nothing -> withError conn hx ym "Invalid amount."
       Just amt -> do
-        categories <- withConn Db.listCategories
+        categories <- Db.listCategories conn
         case find ((== cid) . catId) categories of
-          Nothing -> withError hx ym "Unknown category."
+          Nothing -> withError conn hx ym "Unknown category."
           Just cat
-            | isArchivedCategory cat -> withError hx ym "Cannot assign money to an archived category."
+            | isArchivedCategory cat -> withError conn hx ym "Cannot assign money to an archived category."
             | otherwise -> do
-                withConn (\conn -> Db.setAssignment conn cid ym amt)
-                renderFragment hx ym Nothing
+                Db.setAssignment conn cid ym amt
+                renderFragment conn hx ym Nothing
 
-withError :: Maybe Text -> YearMonth -> Text -> AppM (Html ())
-withError hx ym msg = renderFragment hx ym (Just msg)
+withError :: Connection -> Maybe Text -> YearMonth -> Text -> IO (Html ())
+withError conn hx ym msg = renderFragment conn hx ym (Just msg)
 
--- | Every mutating handler renders back through this. A plain
--- (non-HTMX) request gets a full page back — the progressive-
--- enhancement fallback for when HTMX didn't load — an HTMX request
--- gets just the @#budget-content@ fragment it's about to swap in
--- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'.
-renderFragment :: Maybe Text -> YearMonth -> Maybe Text -> AppM (Html ())
-renderFragment hx ym err = do
-  accounts <- withConn Db.listAccounts
-  groups <- withConn Db.listCategoryGroups
-  categories <- withConn Db.listCategories
-  assignments <- withConn Db.listAllAssignments
-  txs <- withConn Db.listAllTransactions
+-- | Every handler renders back through this, on the one 'Connection'
+-- it was already given. A plain (non-HTMX) request gets a full page
+-- back — the progressive-enhancement fallback for when HTMX didn't
+-- load — an HTMX request gets just the @#budget-content@ fragment
+-- it's about to swap in (hx-swap="outerHTML"); see
+-- 'Api.Html.pageOrFragment'. The several reads this folds together are
+-- wrapped in one 'withReadSnapshot' (Track B §1.4) so they all see the
+-- same point-in-time view of the ledger, instead of each potentially
+-- racing a write landing on a different connection in between.
+renderFragment :: Connection -> Maybe Text -> YearMonth -> Maybe Text -> IO (Html ())
+renderFragment conn hx ym err = withReadSnapshot conn $ do
+  accounts <- Db.listAccounts conn
+  groups <- Db.listCategoryGroups conn
+  categories <- Db.listCategories conn
+  assignments <- Db.listAllAssignments conn
+  txs <- Db.listAllTransactions conn
   let categoryIds = map catId categories
       months = monthsThrough ym assignments txs
       budgets = rolloverMonths accounts categoryIds months assignments txs

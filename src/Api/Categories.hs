@@ -11,6 +11,7 @@ import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
+import Database.SQLite.Simple (Connection)
 import GHC.Generics (Generic)
 import Lucid
 import Servant
@@ -22,6 +23,7 @@ import qualified Db.Account as Db
 import qualified Db.Assignment as Db
 import qualified Db.Category as Db
 import qualified Db.Transaction as Db
+import Db.Tx (withReadSnapshot)
 import Domain.Budget
   ( CategoryMonth (cmCategory)
   , MonthlyBudget (mbCategoryMonths, mbMonth)
@@ -75,15 +77,15 @@ categoriesServer =
     :<|> unarchiveCategoryHandler
 
 listCategoriesHandler :: AppM (Html ())
-listCategoriesHandler = renderFragment Nothing Nothing
+listCategoriesHandler = withConn $ \conn -> renderFragment conn Nothing Nothing
 
 createCategoryGroupHandler :: Maybe Text -> NewCategoryGroupForm -> AppM (Html ())
-createCategoryGroupHandler hx form = do
-  result <- withConn (\conn -> Db.insertCategoryGroup conn (name form))
+createCategoryGroupHandler hx form = withConn $ \conn -> do
+  result <- Db.insertCategoryGroup conn (name form)
   case result of
-    Left (EmptyName _) -> withError hx "Name must not be empty."
-    Left _ -> withError hx "Could not create category group."
-    Right _ -> renderFragment hx Nothing
+    Left (EmptyName _) -> withError conn hx "Name must not be empty."
+    Left _ -> withError conn hx "Could not create category group."
+    Right _ -> renderFragment conn hx Nothing
 
 -- | Blocks archiving a group that still has active (non-archived)
 -- categories in it (DECISIONS.md §11): otherwise those categories would
@@ -93,34 +95,34 @@ createCategoryGroupHandler hx form = do
 -- just makes that ordering explicit instead of a confusing dead end. A
 -- no-op (not an error) on an unknown id, consistent with the Db layer.
 archiveCategoryGroupHandler :: Maybe Text -> Int64 -> AppM (Html ())
-archiveCategoryGroupHandler hx rawId = do
+archiveCategoryGroupHandler hx rawId = withConn $ \conn -> do
   let gid = CategoryGroupId rawId
-  categories <- withConn Db.listCategories
+  categories <- Db.listCategories conn
   if any (\c -> catGroupId c == gid && not (isArchivedCategory c)) categories
-    then withError hx "Cannot archive a group that still has active categories."
+    then withError conn hx "Cannot archive a group that still has active categories."
     else do
-      withConn (\conn -> Db.archiveCategoryGroup conn gid)
-      renderFragment hx Nothing
+      Db.archiveCategoryGroup conn gid
+      renderFragment conn hx Nothing
 
 unarchiveCategoryGroupHandler :: Maybe Text -> Int64 -> AppM (Html ())
-unarchiveCategoryGroupHandler hx rawId = do
-  withConn (\conn -> Db.unarchiveCategoryGroup conn (CategoryGroupId rawId))
-  renderFragment hx Nothing
+unarchiveCategoryGroupHandler hx rawId = withConn $ \conn -> do
+  Db.unarchiveCategoryGroup conn (CategoryGroupId rawId)
+  renderFragment conn hx Nothing
 
 createCategoryHandler :: Maybe Text -> NewCategoryForm -> AppM (Html ())
-createCategoryHandler hx form = case parseCategoryGroupId (groupId form) of
-  Nothing -> withError hx "Unknown category group."
+createCategoryHandler hx form = withConn $ \conn -> case parseCategoryGroupId (groupId form) of
+  Nothing -> withError conn hx "Unknown category group."
   Just gid -> do
-    groups <- withConn Db.listCategoryGroups
+    groups <- Db.listCategoryGroups conn
     if any ((== gid) . cgId) groups
       then do
-        result <- withConn (\conn -> Db.insertCategory conn gid (categoryName form))
+        result <- Db.insertCategory conn gid (categoryName form)
         case result of
-          Left (EmptyName _) -> withError hx "Name must not be empty."
-          Left ArchivedCategoryGroup -> withError hx "Cannot add a category to an archived group."
-          Left _ -> withError hx "Could not create category."
-          Right _ -> renderFragment hx Nothing
-      else withError hx "Unknown category group."
+          Left (EmptyName _) -> withError conn hx "Name must not be empty."
+          Left ArchivedCategoryGroup -> withError conn hx "Cannot add a category to an archived group."
+          Left _ -> withError conn hx "Could not create category."
+          Right _ -> renderFragment conn hx Nothing
+      else withError conn hx "Unknown category group."
 
 -- | Blocks archiving a category that still carries a non-zero balance
 -- in today's local month *or any later one already on the books*
@@ -132,38 +134,42 @@ createCategoryHandler hx form = case parseCategoryGroupId (groupId form) of
 -- category at all. A no-op (not an error) on an unknown id, consistent
 -- with the Db layer.
 archiveCategoryHandler :: Maybe Text -> Int64 -> AppM (Html ())
-archiveCategoryHandler hx rawId = do
+archiveCategoryHandler hx rawId = withConn $ \conn -> do
   let cid = CategoryId rawId
-  categories <- withConn Db.listCategories
+  categories <- Db.listCategories conn
   case find ((== cid) . catId) categories of
-    Nothing -> renderFragment hx Nothing
+    Nothing -> renderFragment conn hx Nothing
     Just _ -> do
-      nonZero <- hasNonZeroBalanceFromNowOn cid
+      nonZero <- hasNonZeroBalanceFromNowOn conn cid
       if nonZero
-        then withError hx "Cannot archive a category with a non-zero balance now or in a later month."
+        then withError conn hx "Cannot archive a category with a non-zero balance now or in a later month."
         else do
-          withConn (\conn -> Db.archiveCategory conn cid)
-          renderFragment hx Nothing
+          Db.archiveCategory conn cid
+          renderFragment conn hx Nothing
 
 unarchiveCategoryHandler :: Maybe Text -> Int64 -> AppM (Html ())
-unarchiveCategoryHandler hx rawId = do
-  withConn (\conn -> Db.unarchiveCategory conn (CategoryId rawId))
-  renderFragment hx Nothing
+unarchiveCategoryHandler hx rawId = withConn $ \conn -> do
+  Db.unarchiveCategory conn (CategoryId rawId)
+  renderFragment conn hx Nothing
 
 -- | Whether a category's 'Domain.Budget.available' balance is non-zero
 -- in today's local month or in any later month already reachable via
 -- @?month=@ (anything in 'monthsThrough's range) — folding the full
 -- rollover history forward exactly like 'Api.Budget.renderFragment'
 -- does for the page the user actually sees, just checked across every
--- month from now on instead of only the one currently viewed.
-hasNonZeroBalanceFromNowOn :: CategoryId -> AppM Bool
-hasNonZeroBalanceFromNowOn cid = do
+-- month from now on instead of only the one currently viewed. Its own
+-- several reads share one 'withReadSnapshot' (Track B §1.4) — a
+-- separate, earlier snapshot than the one 'renderFragment' takes for
+-- the eventual re-render, but both on the one 'Connection' this
+-- request already borrowed.
+hasNonZeroBalanceFromNowOn :: Connection -> CategoryId -> IO Bool
+hasNonZeroBalanceFromNowOn conn cid = withReadSnapshot conn $ do
   today <- localToday
   let ym = dayToYearMonth today
-  accounts <- withConn Db.listAccounts
-  categories <- withConn Db.listCategories
-  assignments <- withConn Db.listAllAssignments
-  txs <- withConn Db.listAllTransactions
+  accounts <- Db.listAccounts conn
+  categories <- Db.listCategories conn
+  assignments <- Db.listAllAssignments conn
+  txs <- Db.listAllTransactions conn
   let categoryIds = map catId categories
       months = monthsThrough ym assignments txs
       budgets = rolloverMonths accounts categoryIds months assignments txs
@@ -171,18 +177,20 @@ hasNonZeroBalanceFromNowOn cid = do
       balanceIn mb = maybe zeroCents available (find ((== cid) . cmCategory) (mbCategoryMonths mb))
   pure (any ((/= zeroCents) . balanceIn) fromNowOn)
 
-withError :: Maybe Text -> Text -> AppM (Html ())
-withError hx msg = renderFragment hx (Just msg)
+withError :: Connection -> Maybe Text -> Text -> IO (Html ())
+withError conn hx msg = renderFragment conn hx (Just msg)
 
--- | Every mutating handler renders back through this. A plain
--- (non-HTMX) request gets a full page back — the progressive-
--- enhancement fallback for when HTMX didn't load — an HTMX request
--- gets just the @#categories-content@ fragment it's about to swap in
--- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'.
-renderFragment :: Maybe Text -> Maybe Text -> AppM (Html ())
-renderFragment hx err = do
-  groups <- withConn Db.listCategoryGroups
-  categories <- withConn Db.listCategories
+-- | Every handler renders back through this, on the one 'Connection'
+-- it was already given. A plain (non-HTMX) request gets a full page
+-- back — the progressive-enhancement fallback for when HTMX didn't
+-- load — an HTMX request gets just the @#categories-content@ fragment
+-- it's about to swap in (hx-swap="outerHTML"); see
+-- 'Api.Html.pageOrFragment'. Both reads share one 'withReadSnapshot'
+-- (Track B §1.4).
+renderFragment :: Connection -> Maybe Text -> Maybe Text -> IO (Html ())
+renderFragment conn hx err = withReadSnapshot conn $ do
+  groups <- Db.listCategoryGroups conn
+  categories <- Db.listCategories conn
   pure (pageOrFragment hx "Categories" (categoriesContent err groups categories))
 
 categoriesContent :: Maybe Text -> [CategoryGroup] -> [Category] -> Html ()

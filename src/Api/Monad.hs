@@ -50,16 +50,20 @@ withConn action = do
 -- | Today's date in the system's *local* timezone, not UTC
 -- ('getCurrentTime'/'utctDay' alone) — a user west of UTC (anywhere in
 -- the Americas, say) could otherwise see "today" roll over several
--- hours early or late (Track A Step 5, S-4).
-localToday :: AppM Day
-localToday = liftIO (localDay . zonedTimeToLocalTime <$> getZonedTime)
+-- hours early or late (Track A Step 5, S-4). Plain 'IO', not 'AppM'
+-- (Track B §1.4): every handler now does its own single 'withConn' per
+-- request and runs its whole body — including this — inside that one
+-- 'IO' callback, rather than opening a connection just to reach an
+-- 'AppM' action that never needed one.
+localToday :: IO Day
+localToday = localDay . zonedTimeToLocalTime <$> getZonedTime
 
 -- | @?month=YYYY-MM@ if present and valid, otherwise today's local
 -- month — never an error either way: an unparseable or missing
 -- @?month=@ just falls back, exactly as if it had been omitted.
 -- Shared by "Api.Budget" and "Api.Transactions", the two pages with
--- month navigation (Track A Step 5, S-4).
-resolveViewedMonth :: Maybe Text -> AppM YearMonth
+-- month navigation (Track A Step 5, S-4). Plain 'IO' — see 'localToday'.
+resolveViewedMonth :: Maybe Text -> IO YearMonth
 resolveViewedMonth monthParam = case monthParam >>= parseYearMonth of
   Just ym -> pure ym
   Nothing -> dayToYearMonth <$> localToday
