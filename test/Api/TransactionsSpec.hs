@@ -4,6 +4,8 @@ import Api.Setup (postHtmlFormHx, withTestApp)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import Data.Char (toLower)
 import Data.List (isInfixOf)
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.Encoding as TLE
 import Data.Time (getCurrentTime, showGregorian, utctDay)
 import Network.Wai.Test (SResponse (simpleBody))
 import Test.Hspec
@@ -146,6 +148,17 @@ spec = with withTestApp $ do
           [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "0.00")]
       liftIO (bodyContains "Invalid amount" response `shouldBe` True)
 
+    it "rejects a new inflow on an archived account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts/1/archive" []
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      liftIO (bodyContains "archived account" response `shouldBe` True)
+      liftIO (bodyContains "Salary" response `shouldBe` False)
+
   describe "POST /transactions/spending" $ do
     it "creates a categorized expense and shows it in the register, stored as negative" $ do
       _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
@@ -248,6 +261,34 @@ spec = with withTestApp $ do
       response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "999" "12.34")
       liftIO (bodyContains "Unknown category" response `shouldBe` True)
 
+    it "rejects a new expense on an archived account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts/1/archive" []
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      day <- liftIO today
+      response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "12.34")
+      liftIO (bodyContains "archived account" response `shouldBe` True)
+
+    it "rejects a split line against an archived category" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories/1/archive" []
+      day <- liftIO today
+      response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "12.34")
+      liftIO (bodyContains "archived category" response `shouldBe` True)
+
+    it "the spending account picker excludes tracking accounts, unlike the inflow/transfer pickers" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Investments"), ("accountType", "tracking")]
+      response <- get "/transactions"
+      -- "Investments" is offered by the inflow picker and both transfer
+      -- pickers (3 selects) but deliberately not the spending one — a
+      -- 'Domain.Transaction.Categorized' transaction can never legally
+      -- land on a tracking account.
+      liftIO (countOccurrences "Investments" response `shouldBe` 3)
+
   describe "POST /transactions/transfer" $ do
     it "creates both legs of a transfer and shows them in the register" $ do
       _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
@@ -278,6 +319,17 @@ spec = with withTestApp $ do
           "/transactions/transfer"
           [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
       liftIO (bodyContains "tracking account" response `shouldBe` True)
+
+    it "rejects a new transfer touching an archived account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Savings"), ("accountType", "savings")]
+      _ <- postHtmlForm "/accounts/2/archive" []
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
+      liftIO (bodyContains "archived account" response `shouldBe` True)
 
   describe "POST /transactions/:id/clear" $
     it "toggles a transaction between Uncleared and Cleared (the first step of reconciling)" $ do
@@ -393,3 +445,6 @@ bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody
 -- isn't a contract worth pinning a test to.
 bodyContainsCI :: String -> SResponse -> Bool
 bodyContainsCI needle = (map toLower needle `isInfixOf`) . map toLower . BSL8.unpack . simpleBody
+
+countOccurrences :: TL.Text -> SResponse -> Int
+countOccurrences needle = fromIntegral . TL.count needle . TLE.decodeUtf8 . simpleBody

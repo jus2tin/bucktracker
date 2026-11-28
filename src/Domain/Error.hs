@@ -37,4 +37,11 @@ data DomainError
     -- that confirmation. Enforced by 'Db.Transaction.deleteTransaction'
     -- and the @update*@ family.
     CannotModifyReconciledTransaction
+  | -- | 'Db.Category.insertCategory' targeted a 'Domain.Category.CategoryGroup'
+    -- that's already archived (Track A Step 6, DECISIONS.md §11): an
+    -- archived group is meant to be a dead end for new children, not
+    -- just a label — otherwise a group archived to get it out of the
+    -- "add category" picker could still silently grow new categories
+    -- through this route.
+    ArchivedCategoryGroup
   deriving stock (Eq, Show)

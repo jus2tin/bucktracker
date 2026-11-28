@@ -48,12 +48,62 @@ spec = with withTestApp $ do
       response <- postHtmlForm "/accounts" [("name", ""), ("accountType", "checking")]
       liftIO (bodyContains "Name must not be empty" response `shouldBe` True)
 
-  describe "POST /accounts/:id/archive" $
+  describe "POST /accounts/:id/archive" $ do
     it "archives the account: the button disappears, the status changes" $ do
       _ <- postHtmlForm "/accounts" [("name", "Old Account"), ("accountType", "cash")]
       response <- postHtmlForm "/accounts/1/archive" []
       liftIO (bodyContains "Archived" response `shouldBe` True)
       liftIO (bodyContains "Archive<" response `shouldBe` False)
+      liftIO (bodyContains "Unarchive" response `shouldBe` True)
+
+    it "rejects archiving an account with a non-zero balance, without changing anything" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      today <- liftIO (showGregorian . utctDay <$> getCurrentTime)
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", today), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      response <- postHtmlForm "/accounts/1/archive" []
+      liftIO (bodyContains "non-zero balance" response `shouldBe` True)
+      liftIO (bodyContains "Archived" response `shouldBe` False)
+
+    it "rejects archiving a zero-balance account that still has unreconciled rows (AUDIT-04)" $ do
+      -- Offsetting +100/-100 nets to a zero balance, but neither row
+      -- has been reconciled — archiving must not permanently hide the
+      -- only way left to reconcile them (Api.Accounts.reconcileCell).
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      today <- liftIO (showGregorian . utctDay <$> getCurrentTime)
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", today), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", today), ("inflowPayee", "Correction"), ("inflowAmount", "-100.00")]
+      response <- postHtmlForm "/accounts/1/archive" []
+      liftIO (bodyContains "unreconciled transactions" response `shouldBe` True)
+      liftIO (bodyContains "Archived" response `shouldBe` False)
+
+  describe "POST /accounts/:id/unarchive" $
+    it "unarchives the account: the status reverts, Archive comes back" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Old Account"), ("accountType", "cash")]
+      _ <- postHtmlForm "/accounts/1/archive" []
+      response <- postHtmlForm "/accounts/1/unarchive" []
+      liftIO (bodyContains "Archived" response `shouldBe` False)
+      liftIO (bodyContains "Archive<" response `shouldBe` True)
+
+  describe "the reconcile control on an archived account" $
+    it "is hidden once the account is archived" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Old Account"), ("accountType", "cash")]
+      _ <- postHtmlForm "/accounts/1/archive" []
+      response <- get "/accounts"
+      liftIO (bodyContains "statementBalance" response `shouldBe` False)
+
+  describe "onboarding" $
+    it "shows a hint to add the first account when there are none yet" $ do
+      response <- get "/accounts"
+      liftIO (bodyContains "No accounts yet" response `shouldBe` True)
 
   describe "GET /accounts (balance column)" $
     it "shows an account's running balance, not just its name/type/status" $ do

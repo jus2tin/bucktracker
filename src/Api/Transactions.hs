@@ -31,12 +31,30 @@
 -- landing back on the current month afterward is a minor rough edge,
 -- not a correctness issue, and avoids two more hidden fields on every
 -- one of the six forms on this page.
+--
+-- Archived accounts/categories (Track A Step 6, DECISIONS.md §11) are
+-- rejected server-side on every *create* ('withValidInflow'\/
+-- 'withValidSpending'\/'withValidTransfer' hand their fetched
+-- @[Account]@\/@[Category]@ to the caller precisely so each create
+-- handler can add that check on top) but deliberately *not* on an edit
+-- of a transaction that's already on one — the account/category picker
+-- a create form offers only ever lists active (and, for the spending
+-- form, on-budget-only) entities to begin with, so this is defense in
+-- depth for a direct POST, not something reachable through the UI. An
+-- edit form, by contrast, still needs to show the transaction's
+-- *current* account/category even if it's since been archived or (for
+-- spending) is the "wrong" budget type — 'accountChoices'\/
+-- 'categoryChoices' append that one entity back on if the active-only
+-- filter would otherwise have dropped it, so a @\<select\>@ never
+-- silently loses its selected option and reassigns the transaction on
+-- save.
 module Api.Transactions
   ( TransactionsApi
   , transactionsServer
   ) where
 
 import Data.Int (Int64)
+import Data.List (find)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -65,7 +83,7 @@ import Api.Money (centsToEuroText, parseNonZeroSignedEuros, parsePositiveEuros)
 import qualified Db.Account as Db
 import qualified Db.Category as Db
 import qualified Db.Transaction as Db
-import Domain.Account (Account (accId, accName), isArchived)
+import Domain.Account (Account (accId, accName), isArchived, isOnBudget)
 import Domain.Category (Category (catId, catName), isArchivedCategory)
 import Domain.Error (DomainError (..))
 import Domain.Transaction
@@ -175,11 +193,14 @@ parseAccountFilterText t
   | Text.null (Text.strip t) = Nothing
   | otherwise = parseAccountId t
 
--- | Parses and validates an inflow form's fields, then hands them to
--- @go@ — shared by 'createInflowHandler' and 'editInflowHandler', which
+-- | Parses and validates an inflow form's fields, then hands them
+-- (along with the accounts just fetched to validate @aid@) to @go@ —
+-- shared by 'createInflowHandler' and 'editInflowHandler', which
 -- otherwise differ only in calling 'Db.insertInflow' or
--- 'Db.updateInflow'.
-withValidInflow :: Maybe Text -> NewInflowForm -> (AccountId -> Day -> Text -> Cents -> AppM (Html ())) -> AppM (Html ())
+-- 'Db.updateInflow', and in whether archived accounts are rejected (see
+-- the module header).
+withValidInflow
+  :: Maybe Text -> NewInflowForm -> ([Account] -> AccountId -> Day -> Text -> Cents -> AppM (Html ())) -> AppM (Html ())
 withValidInflow hx form go = case parseAccountId (inflowAccountId form) of
   Nothing -> withError hx "Unknown account."
   Just aid -> case parseIsoDate (inflowDate form) of
@@ -190,15 +211,18 @@ withValidInflow hx form go = case parseAccountId (inflowAccountId form) of
         accounts <- withConn Db.listAccounts
         if not (any ((== aid) . accId) accounts)
           then withError hx "Unknown account."
-          else go aid day (inflowPayee form) amt
+          else go accounts aid day (inflowPayee form) amt
 
 createInflowHandler :: Maybe Text -> NewInflowForm -> AppM (Html ())
-createInflowHandler hx form = withValidInflow hx form $ \aid day payee amt -> do
-  _ <- withConn (\conn -> Db.insertInflow conn aid day payee defaultStatus amt Nothing)
-  renderDefault hx
+createInflowHandler hx form = withValidInflow hx form $ \accounts aid day payee amt ->
+  case find ((== aid) . accId) accounts of
+    Just acc | isArchived acc -> withError hx "Cannot add a transaction to an archived account."
+    _ -> do
+      _ <- withConn (\conn -> Db.insertInflow conn aid day payee defaultStatus amt Nothing)
+      renderDefault hx
 
 editInflowHandler :: Maybe Text -> Int64 -> NewInflowForm -> AppM (Html ())
-editInflowHandler hx rawId form = withValidInflow hx form $ \aid day payee amt -> do
+editInflowHandler hx rawId form = withValidInflow hx form $ \_accounts aid day payee amt -> do
   result <- withConn (\conn -> Db.updateInflow conn (TransactionId rawId) aid day payee amt)
   case result of
     Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
@@ -206,12 +230,14 @@ editInflowHandler hx rawId form = withValidInflow hx form $ \aid day payee amt -
     Right _ -> renderDefault hx
 
 -- | Parses and validates a spending (split) form's fields, then hands
--- them to @go@ — shared by 'createSpendingHandler' and
--- 'editSpendingHandler'.
+-- them (along with the accounts/categories just fetched to validate
+-- them) to @go@ — shared by 'createSpendingHandler' and
+-- 'editSpendingHandler', which otherwise differ as described in the
+-- module header.
 withValidSpending
   :: Maybe Text
   -> NewSpendingForm
-  -> (AccountId -> Day -> Text -> NonEmpty TransactionLine -> AppM (Html ()))
+  -> ([Account] -> [Category] -> AccountId -> Day -> Text -> NonEmpty TransactionLine -> AppM (Html ()))
   -> AppM (Html ())
 withValidSpending hx form go = case parseAccountId (spendingAccountId form) of
   Nothing -> withError hx "Unknown account."
@@ -230,19 +256,25 @@ withValidSpending hx form go = case parseAccountId (spendingAccountId form) of
             else
               if not (all (\l -> any ((== tlCategory l) . catId) categories) (toList lines'))
                 then withError hx "Unknown category."
-                else go aid day (spendingPayee form) lines'
+                else go accounts categories aid day (spendingPayee form) lines'
 
 createSpendingHandler :: Maybe Text -> NewSpendingForm -> AppM (Html ())
-createSpendingHandler hx form = withValidSpending hx form $ \aid day payee lines' -> do
-  result <- withConn (\conn -> Db.insertSpending conn aid day payee defaultStatus lines' Nothing)
-  case result of
-    Left CategorizedTransactionRequiresOnBudgetAccount ->
-      withError hx "Categorized transactions are not allowed on tracking accounts."
-    Left _ -> withError hx "Could not create transaction."
-    Right _ -> renderDefault hx
+createSpendingHandler hx form = withValidSpending hx form $ \accounts categories aid day payee lines' ->
+  case find ((== aid) . accId) accounts of
+    Just acc | isArchived acc -> withError hx "Cannot add a transaction to an archived account."
+    _
+      | any (isArchivedLine categories) (toList lines') ->
+          withError hx "Cannot categorize a transaction against an archived category."
+      | otherwise -> do
+          result <- withConn (\conn -> Db.insertSpending conn aid day payee defaultStatus lines' Nothing)
+          case result of
+            Left CategorizedTransactionRequiresOnBudgetAccount ->
+              withError hx "Categorized transactions are not allowed on tracking accounts."
+            Left _ -> withError hx "Could not create transaction."
+            Right _ -> renderDefault hx
 
 editSpendingHandler :: Maybe Text -> Int64 -> NewSpendingForm -> AppM (Html ())
-editSpendingHandler hx rawId form = withValidSpending hx form $ \aid day payee lines' -> do
+editSpendingHandler hx rawId form = withValidSpending hx form $ \_accounts _categories aid day payee lines' -> do
   result <- withConn (\conn -> Db.updateSpending conn (TransactionId rawId) aid day payee lines')
   case result of
     Left CategorizedTransactionRequiresOnBudgetAccount ->
@@ -251,10 +283,21 @@ editSpendingHandler hx rawId form = withValidSpending hx form $ \aid day payee l
     Left _ -> withError hx "Could not update transaction."
     Right _ -> renderDefault hx
 
--- | Parses and validates a transfer form's fields, then hands them to
--- @go@ — shared by 'createTransferHandler' and 'editTransferHandler'.
+-- | Whether a split line's category is archived — 'createSpendingHandler'\'s
+-- own guard against new spending landing on one (the existence check
+-- already happened in 'withValidSpending', so 'Nothing' here is
+-- unreachable, not a silent pass).
+isArchivedLine :: [Category] -> TransactionLine -> Bool
+isArchivedLine categories l = maybe False isArchivedCategory (find ((== tlCategory l) . catId) categories)
+
+-- | Parses and validates a transfer form's fields, then hands them
+-- (along with the accounts just fetched to validate them) to @go@ —
+-- shared by 'createTransferHandler' and 'editTransferHandler'.
 withValidTransfer
-  :: Maybe Text -> NewTransferForm -> (AccountId -> AccountId -> Day -> Cents -> AppM (Html ())) -> AppM (Html ())
+  :: Maybe Text
+  -> NewTransferForm
+  -> ([Account] -> AccountId -> AccountId -> Day -> Cents -> AppM (Html ()))
+  -> AppM (Html ())
 withValidTransfer hx form go = case parseAccountId (transferFromAccountId form) of
   Nothing -> withError hx "Unknown account."
   Just fromAid -> case parseAccountId (transferToAccountId form) of
@@ -267,20 +310,23 @@ withValidTransfer hx form go = case parseAccountId (transferFromAccountId form) 
           accounts <- withConn Db.listAccounts
           if not (all (`elem` map accId accounts) [fromAid, toAid])
             then withError hx "Unknown account."
-            else go fromAid toAid day amt
+            else go accounts fromAid toAid day amt
 
 createTransferHandler :: Maybe Text -> NewTransferForm -> AppM (Html ())
-createTransferHandler hx form = withValidTransfer hx form $ \fromAid toAid day amt -> do
-  result <- withConn (\conn -> Db.insertTransfer conn (fromAid, toAid) day defaultStatus amt)
-  case result of
-    Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
-    Left TransferRequiresMatchingBudgetStatus ->
-      withError hx "Cannot transfer between an on-budget and a tracking account."
-    Left _ -> withError hx "Could not create transfer."
-    Right _ -> renderDefault hx
+createTransferHandler hx form = withValidTransfer hx form $ \accounts fromAid toAid day amt ->
+  if any (\acc -> accId acc `elem` [fromAid, toAid] && isArchived acc) accounts
+    then withError hx "Cannot add a transaction to an archived account."
+    else do
+      result <- withConn (\conn -> Db.insertTransfer conn (fromAid, toAid) day defaultStatus amt)
+      case result of
+        Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
+        Left TransferRequiresMatchingBudgetStatus ->
+          withError hx "Cannot transfer between an on-budget and a tracking account."
+        Left _ -> withError hx "Could not create transfer."
+        Right _ -> renderDefault hx
 
 editTransferHandler :: Maybe Text -> Int64 -> NewTransferForm -> AppM (Html ())
-editTransferHandler hx rawId form = withValidTransfer hx form $ \fromAid toAid day amt -> do
+editTransferHandler hx rawId form = withValidTransfer hx form $ \_accounts fromAid toAid day amt -> do
   result <- withConn (\conn -> Db.updateTransfer conn (TransactionId rawId) (fromAid, toAid) day amt)
   case result of
     Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
@@ -384,26 +430,50 @@ accountFilterBanner accounts (Just aid) =
     toHtml ("Showing: " <> accountNameFor accounts aid <> " ")
     a_ [href_ "/transactions"] "[show all accounts]"
 
-activeAccounts :: [Account] -> [Account]
-activeAccounts = filter (not . isArchived)
+-- | Accounts offered in a picker: active accounts (also on-budget-only,
+-- for the spending form's @onBudgetOnly@), plus — if @selected@ names
+-- one the active-only filter would otherwise have dropped (an edit
+-- form, showing a since-archived account) — that one account too, so
+-- the @\<select\>@ never loses its currently-selected option and
+-- silently reassigns the transaction to whatever's first in the list on
+-- save. See the module header.
+accountChoices :: Bool -> Maybe AccountId -> [Account] -> [Account]
+accountChoices onBudgetOnly selected accounts = eligible ++ extra
+  where
+    eligible = filter (\a -> not (isArchived a) && (not onBudgetOnly || isOnBudget a)) accounts
+    extra = case selected >>= \aid -> find ((== aid) . accId) accounts of
+      Just acc | accId acc `notElem` map accId eligible -> [acc]
+      _ -> []
 
-activeCategories :: [Category] -> [Category]
-activeCategories = filter (not . isArchivedCategory)
+-- | Categories offered in a picker: active categories, plus — same
+-- reasoning as 'accountChoices' — whichever one is currently selected,
+-- even if it's since been archived.
+categoryChoices :: Maybe CategoryId -> [Category] -> [Category]
+categoryChoices selected categories = eligible ++ extra
+  where
+    eligible = filter (not . isArchivedCategory) categories
+    extra = case selected >>= \cid -> find ((== cid) . catId) categories of
+      Just cat | catId cat `notElem` map catId eligible -> [cat]
+      _ -> []
 
 -- | @selected@ pre-selects an option — used by the edit forms to show
 -- the transaction's current account; 'Nothing' (the create forms) just
--- leaves the browser's own default (the first option) in place.
+-- leaves the browser's own default (the first option) in place. An
+-- archived account stays labelled as such, since 'accountChoices' can
+-- surface one here that no longer appears anywhere else on the page.
 accountOption :: Maybe AccountId -> Account -> Html ()
 accountOption selected acc =
-  option_ (value_ (idText (accId acc)) : [selected_ "" | selected == Just (accId acc)]) (toHtml (accName acc))
+  option_ (value_ (idText (accId acc)) : [selected_ "" | selected == Just (accId acc)]) (toHtml label)
   where
     idText (AccountId i) = Text.pack (show i)
+    label = accName acc <> (if isArchived acc then " (archived)" else "")
 
 categoryOption :: Maybe CategoryId -> Category -> Html ()
 categoryOption selected cat =
-  option_ (value_ (idText (catId cat)) : [selected_ "" | selected == Just (catId cat)]) (toHtml (catName cat))
+  option_ (value_ (idText (catId cat)) : [selected_ "" | selected == Just (catId cat)]) (toHtml label)
   where
     idText (CategoryId i) = Text.pack (show i)
+    label = catName cat <> (if isArchivedCategory cat then " (archived)" else "")
 
 -- | Wrapped in @\<details\>@ (id @new-inflow-details@, targeted by the
 -- @i@ keyboard shortcut in @static/app.js@) rather than a
@@ -422,7 +492,7 @@ newInflowForm today accounts =
       , hxSwap_ "outerHTML"
       ]
       $ do
-        select_ [name_ "inflowAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
+        select_ [name_ "inflowAccountId"] (mapM_ (accountOption Nothing) (accountChoices False Nothing accounts))
         input_ [type_ "date", name_ "inflowDate", value_ (dayText today)]
         input_ [type_ "text", name_ "inflowPayee", placeholder_ "Payee"]
         input_ [type_ "text", name_ "inflowAmount", placeholder_ "0.00 (negative = opening balance correction)"]
@@ -436,7 +506,7 @@ editInflowForm accounts tx amt =
   form_
     [method_ "post", action_ routePath, hxPost_ routePath, hxTarget_ "#transactions-content", hxSwap_ "outerHTML"]
     $ do
-      select_ [name_ "inflowAccountId"] (mapM_ (accountOption (Just (txAccount tx))) (activeAccounts accounts))
+      select_ [name_ "inflowAccountId"] (mapM_ (accountOption (Just (txAccount tx))) (accountChoices False (Just (txAccount tx)) accounts))
       input_ [type_ "date", name_ "inflowDate", value_ (dayText (txDate tx))]
       input_ [type_ "text", name_ "inflowPayee", value_ (txPayee tx)]
       input_ [type_ "text", name_ "inflowAmount", value_ (centsToEuroText amt)]
@@ -472,7 +542,7 @@ newSpendingForm today accounts categories =
       , xData_ "splitEditor()"
       ]
       $ do
-        select_ [name_ "spendingAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
+        select_ [name_ "spendingAccountId"] (mapM_ (accountOption Nothing) (accountChoices True Nothing accounts))
         input_ [type_ "date", name_ "spendingDate", value_ (dayText today)]
         input_ [type_ "text", name_ "spendingPayee", placeholder_ "Payee"]
         input_
@@ -500,7 +570,7 @@ editSpendingForm accounts categories tx lines' =
     , xData_ "splitEditor()"
     ]
     $ do
-      select_ [name_ "spendingAccountId"] (mapM_ (accountOption (Just (txAccount tx))) (activeAccounts accounts))
+      select_ [name_ "spendingAccountId"] (mapM_ (accountOption (Just (txAccount tx))) (accountChoices True (Just (txAccount tx)) accounts))
       input_ [type_ "date", name_ "spendingDate", value_ (dayText (txDate tx))]
       input_ [type_ "text", name_ "spendingPayee", value_ (txPayee tx)]
       input_
@@ -525,7 +595,7 @@ editSpendingForm accounts categories tx lines' =
 splitLineRow :: [Category] -> Maybe (CategoryId, Cents) -> Html ()
 splitLineRow categories prefill =
   div_ [class_ "split-line"] $ do
-    select_ [name_ "lineCategoryId"] (mapM_ (categoryOption (fst <$> prefill)) (activeCategories categories))
+    select_ [name_ "lineCategoryId"] (mapM_ (categoryOption (fst <$> prefill)) (categoryChoices (fst <$> prefill) categories))
     input_
       ( [type_ "text", name_ "lineAmount", placeholder_ "0.00 (negative = refund)", xOn_ "input" "recalc()"]
           ++ maybe [] (\(_, amt) -> [value_ (centsToEuroText amt)]) prefill
@@ -546,8 +616,8 @@ newTransferForm today accounts =
       , hxSwap_ "outerHTML"
       ]
       $ do
-        select_ [name_ "transferFromAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
-        select_ [name_ "transferToAccountId"] (mapM_ (accountOption Nothing) (activeAccounts accounts))
+        select_ [name_ "transferFromAccountId"] (mapM_ (accountOption Nothing) (accountChoices False Nothing accounts))
+        select_ [name_ "transferToAccountId"] (mapM_ (accountOption Nothing) (accountChoices False Nothing accounts))
         input_ [type_ "date", name_ "transferDate", value_ (dayText today)]
         input_ [type_ "number", step_ "0.01", min_ "0", name_ "transferAmount", placeholder_ "0.00"]
         button_ [type_ "submit"] "Add transfer"
@@ -564,8 +634,8 @@ editTransferForm accounts tx counterpartAcc legAmount =
   form_
     [method_ "post", action_ routePath, hxPost_ routePath, hxTarget_ "#transactions-content", hxSwap_ "outerHTML"]
     $ do
-      select_ [name_ "transferFromAccountId"] (mapM_ (accountOption (Just fromAccId)) (activeAccounts accounts))
-      select_ [name_ "transferToAccountId"] (mapM_ (accountOption (Just toAccId)) (activeAccounts accounts))
+      select_ [name_ "transferFromAccountId"] (mapM_ (accountOption (Just fromAccId)) (accountChoices False (Just fromAccId) accounts))
+      select_ [name_ "transferToAccountId"] (mapM_ (accountOption (Just toAccId)) (accountChoices False (Just toAccId) accounts))
       input_ [type_ "date", name_ "transferDate", value_ (dayText (txDate tx))]
       input_ [type_ "number", step_ "0.01", min_ "0", name_ "transferAmount", value_ (centsToEuroText absAmount)]
       button_ [type_ "submit"] "Save"

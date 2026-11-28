@@ -1,6 +1,6 @@
 name:                bucktracker
 version:             0.1.0.0
-github:              "justintermaat/bucktracker"
+github:              "jus2tin/bucktracker"
 license:             MIT
 author:              "Justin Termaat"
 maintainer:          "justintermaat@gmail.com"
@@ -24,7 +24,7 @@ data-files:
 synopsis:            Personal zero-based / envelope budget and money tracker
 category:            Finance
 
-description:         Please see the README on GitHub at <https://github.com/justintermaat/bucktracker#readme>
+description:         Please see the README on GitHub at <https://github.com/jus2tin/bucktracker#readme>
 
 dependencies:
 - base >= 4.7 && < 5

@@ -5,11 +5,12 @@
 - **Prerequisite Review:** [`docs/reviews/2026-11-27-mvp-adversarial-review.md`](../reviews/2026-11-27-mvp-adversarial-review.md)
 - **Architectural Decisions:** [`DECISIONS.md` §§8–12](../../DECISIONS.md)
 
-> **Note on Phase Naming:** Earlier sections of [`DECISIONS.md`](../../DECISIONS.md) referred to the three internal layers of the initial build (`Domain`, `Db`, `Api`) as "Phase 1/2/3". At the product level, that initial MVP candidate was **Product Phase 1**. This document defines **Product Phase 2**, organized into four sequential tracks of concrete, commit-sized steps (see the amendment immediately below for why there are four, not three):
+> **Note on Phase Naming:** Earlier sections of [`DECISIONS.md`](../../DECISIONS.md) referred to the three internal layers of the initial build (`Domain`, `Db`, `Api`) as "Phase 1/2/3". At the product level, that initial MVP candidate was **Product Phase 1**. This document defines **Product Phase 2+**, organized into sequential tracks of concrete, commit-sized steps:
 > - **Track A (Steps 1–6):** Frontend & UX Foundation (Servant `/static/*`, Pico CSS, Alpine.js micro-interactions, inline `/budget` editing) + MVP showstopper remediation.
-> - **Track B (Steps 7–9, 11–12):** Security middleware, SQLite WAL concurrency, online backups, and zero-warning `-Werror` CI — this track's exit gate is the **`v0.1.0`** sign-off.
-> - **Track C (Step 10):** CSV / CAMT.053 bank statement import.
-> - **Track D (Steps 13–17):** Scheduled transactions & pure cash-flow projections (`v0.2.0` `/forecast`).
+> - **Track B (Steps 7–9, 11–12):** Security middleware, SQLite WAL concurrency, online backups, and zero-warning `-Werror` CI — **`v0.1.0` sign-off gate** (turnkey spec: [`track-b-spec.md`](track-b-spec.md)).
+> - **Track C (Step 10):** ABN AMRO `CAMT.053` / `.TAB` bank statement import (turnkey spec: [`track-c-abn-amro-import-spec.md`](track-c-abn-amro-import-spec.md)).
+> - **Track D (Steps 13–17 + R-1..R-4):** Zero-JS Net-Worth & Monthly Spending Reports (`/reports`, spec: [`track-d-reporting-spec.md`](track-d-reporting-spec.md)) + Scheduled Cash-Flow Projections (`/forecast`).
+> - **Track E (Planned — Post-Tracks B–D):** Recurring Obligations & Fixed Bills (`/recurring`, charter: [`track-e-recurring-spec.md`](track-e-recurring-spec.md)).
 
 > **Amendment (2026-11-27, Product Owner decision, following Developer feedback on this plan):** The original Track B bundled three differently-sized efforts into one review/merge unit — security & CSRF middleware, SQLite concurrency fixes, and a full CAMT.053/CSV bank-import feature (XML parsing, deterministic dedup hashing, a whole import preview UI). The PO agreed these shouldn't land together and split bank import into its own **Track C**, renumbering the former Track C (Scheduled Transactions & Forecasting) to **Track D**. Step numbers themselves are unchanged — Step 10 is still "Step 10", just filed under the new Track C heading instead of Track B. The PO also confirmed explicitly: **`v0.1.0` is tagged at the end of the (now security/concurrency/CI-only) Track B, not at Track A alone** — even though Track A's own exit gate already produces a fully usable daily driver, hardening is treated as part of the release gate, not an optional follow-up. Track C (bank import) does not block the `v0.1.0` tag and may land before or after it.
 
@@ -18,10 +19,9 @@
 ## Execution Rules for the Developer (Claude)
 
 1. **One step (or tightly coupled pair) per PR/commit batch.** Keep diffs small and reviewable.
-2. **Zero-build-step & strict JS boundary (`DECISIONS.md` §12):** No Node, npm, or bundlers. Static assets live in `static/` via Cabal `data-files`. Alpine.js is **strictly** for ephemeral local UI state (never persistent state, never `Float`/`Double` currency math — integer cents only even in JS previews!).
-3. **Same-commit documentation rule (`CLAUDE.md`):** Update [`ARCHITECTURE.md`](../../ARCHITECTURE.md) in the **same commit** whenever a step adds/changes a route, static asset convention, database table, or domain rule.
-4. **Total functions & strict warnings:** Maintain zero partial functions (`head`, `read`, `fromJust`, `error`) and keep `stack test` green at every commit.
-5. **Handoff paper trail:** At the end of each Track (A, B, C, and D), write a concise handoff summary in `docs/handoffs/YYYY-MM-DD-phase-02-track-<x>.md` using [`docs/handoffs/TEMPLATE.md`](../handoffs/TEMPLATE.md).
+2. **Code-Only File-Ownership Firewall (`CLAUDE.md` / `GEMINI.md`):** Touch **only** `src/**`, `app/**`, `migrations/*.sql`, `test/**/*.hs`, `static/**`, `package.yaml`, and `stack.yaml`. Do **not** edit Markdown docs (`ARCHITECTURE.md`, `DECISIONS.md`, `CHANGELOG.md`, `docs/**`) — Carbon updates all documentation and handoffs after your commits.
+3. **Zero-build-step & strict JS boundary (`DECISIONS.md` §12):** No Node, npm, or bundlers. Static assets live in `static/` via Cabal `data-files`. Alpine.js is **strictly** for ephemeral local UI state (never persistent state, never dynamic string interpolation in `x-*` attributes, never `Float`/`Double` currency math — integer cents only even in JS previews!).
+4. **Total functions & single-pass test runs:** Maintain zero partial functions (`head`, `read`, `fromJust`, `error`) and verify each step with a single `stack test --fast --test-arguments="--format=progress"`.
 
 ---
 
@@ -171,4 +171,15 @@
 - [ ] Mount `/forecast` (`?months=3|6|12`) displaying account cash-flow runway & lowest-balance overdraft alerts, month-by-month projected category `Available` balances (highlighting upcoming negative shortfalls), and net-worth/savings trajectory — while verifying `/budget` remains strictly real cash only.
 
 ### Step 17 — `v0.2.0` Documentation Sync, Handoff & Architect Review #2
-- [ ] Sync `ARCHITECTURE.md` and `CHANGELOG.md` (`0.2.0.0`), confirm `stack test --ghc-options=-Werror` is green, write `docs/handoffs/YYYY-MM-DD-phase-02-track-d.md`, and run Architect Milestone Review #2 for `v0.2.0` sign-off.
+- [ ] Confirm `stack test --ghc-options=-Werror` is green; Carbon syncs `ARCHITECTURE.md`, `CHANGELOG.md` (`0.2.0.0`), `docs/handoffs/YYYY-MM-DD-phase-02-track-d.md`, and runs Architect Milestone Review #2 for `v0.2.0` sign-off.
+
+---
+
+## Track E — Recurring Obligations & Fixed Bills (`/recurring`, `DECISIONS.md` §13)
+
+**Status:** Planned charter captured in [`docs/phases/track-e-recurring-spec.md`](track-e-recurring-spec.md); full turnkey engineering spec to be authored by Carbon after Tracks B–D complete.
+
+### Core Scope Locked In
+1. **Natural Category Placement + Orthogonal `is_fixed_obligation` Flag:** Every `recurring_rule` (`amount`, `cadence`: `Monthly | Quarterly | Annual`, `expected_day`, `target_category_id`) lands in its natural budget envelope (e.g., *Netflix*/*Crunchyroll* in *Entertainment*, *Basic-Fit* in *Sport*) so subscriptions compete directly with one-off purchases in that category, while `is_fixed_obligation :: Bool` distinguishes mandatory baseline bills (rent/mortgage, health insurance, utilities, internet, municipal/vehicle taxes) from discretionary subscriptions.
+2. **Dedicated `/recurring` View & Monthly Baseline Summary:** Displays all recurring rules with derived monthly status (`Funded` / `Paid` / `Due`, matched via category activity/imports) and reports the **monthly mandatory fixed-obligation baseline** (including `1/3` quarterly and `1/12` annual integer-cent sinking-fund accruals) separately from **discretionary recurring subscriptions**.
+3. **One-Click "Fund Recurring" Action:** Atomically and idempotently tops up each active recurring rule's target category `Assignment` for the active month (aggregating multiple rules targeting the same category) without manual data entry across 10+ rows.

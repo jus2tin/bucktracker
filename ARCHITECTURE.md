@@ -93,12 +93,12 @@ Transactions page fills in the spending form and clicks submit.
 3. **The handler does HTTP-shaped validation.**
    `createSpendingHandler` turns the form's `Text` fields into real
    types: an `AccountId`, a `CategoryId`, a `Day`, a `Cents` amount —
-   using small total parsers (`parseAccountId`, `Api.Money.parsePositiveEuros`,
+   using small total parsers (`parseAccountId`, `Api.Money.parseNonZeroSignedEuros`,
    `parseIsoDate`; never `Prelude.read`, which can crash on bad input).
-   It also checks the account and category actually exist. Anything
-   wrong here (unknown account, "not a number" in the amount field)
-   short-circuits straight to an error message — the database is never
-   touched.
+   It also checks the account and category actually exist and are not
+   archived. Anything wrong here (unknown or archived account, "not a
+   number" in the amount field) short-circuits straight to an error
+   message — the database is never touched.
 
 4. **The Db layer does the real write.** The handler calls
    `Db.insertSpending` (`src/Db/Transaction.hs`), which runs inside one
@@ -420,6 +420,64 @@ filtered doesn't silently drop it. The register also gained the
 missing **Account** column — every row now shows which account it
 belongs to, filtered or not.
 
+### Archiving, unarchiving, and entity guards
+
+Accounts, category groups, and categories are never hard-deleted —
+historical transactions and past monthly rollovers still reference
+them, so "deleting" is soft-delete via a nullable `archived_at`
+timestamp (`DECISIONS.md` §7, §11).
+
+Archiving is **two-way** and **guarded** on both the UI and server
+sides:
+
+- **Confirmation & undo:** Every active account, category group, and
+  category renders an `Archive` button gated by `hx-confirm` so a stray
+  click doesn't immediately hide an entity; once archived, the same
+  column switches to an `Unarchive` button (`Db.Account.unarchiveAccount`,
+  `Db.Category.unarchiveCategoryGroup`, `Db.Category.unarchiveCategory`).
+  Both `archive*` (`WHERE id = ? AND archived_at IS NULL`) and
+  `unarchive*` (`WHERE id = ? AND archived_at IS NOT NULL`) are
+  idempotent.
+- **Preconditions before archiving:**
+  - An **account** cannot be archived while `Domain.Budget.accountBalance`
+    is non-zero (`Api.Accounts.archiveAccountHandler`) — hiding an
+    account that still holds money would leave funds invisible in new
+    entry pickers. Once archived, its `Reconcile` form is hidden too
+    (`reconcileCell`).
+  - A **category** cannot be archived while its current folded
+    `Domain.Budget.available` balance is non-zero
+    (`Api.Categories.archiveCategoryHandler` via `currentlyAvailable`,
+    using the shared `Domain.Budget.monthsThrough` + `rolloverMonths` +
+    `budgetFor` chain). On `/budget`, archived categories with zero
+    `Carried In`, `Assigned`, and `Activity` are hidden from the table
+    while remaining inside `rolloverMonths` so Invariant 1 holds across
+    the entire ledger history.
+  - A **category group** cannot be archived while any child category in
+    it is still active (`Api.Categories.archiveCategoryGroupHandler`).
+- **Server-side guards against writing to archived entities:**
+  - Creating a category inside an archived group is rejected by
+    `Db.Category.insertCategory` (`Left ArchivedCategoryGroup`).
+  - Assigning money to an archived category is rejected by
+    `Api.Budget.assignHandler`.
+  - Creating a new inflow, spending transaction, or transfer against an
+    archived account (or an archived category on any split line) is
+    rejected server-side in `Api.Transactions` (`createInflowHandler`,
+    `createSpendingHandler`, `createTransferHandler`), not merely hidden
+    in `<select>` menus. The spending create form also filters its
+    account picker to **active on-budget accounts only**
+    (`accountChoices True Nothing`), never offering `Tracking` accounts
+    that would fail `CategorizedTransactionRequiresOnBudgetAccount`.
+  - **Edit-form exception (`accountChoices` / `categoryChoices`):**
+    Editing an *existing* historical transaction on a since-archived
+    account or category appends that one entity (labelled
+    `"(archived)"`) back into the edit form's `<select>` so opening and
+    saving an edit never silently reassigns the transaction to a
+    different active option.
+- **First-run onboarding:** When no accounts or category groups/categories
+  exist yet, `/accounts` and `/categories` render plain-English
+  `onboardingBanner` prompts explaining what to create first instead of
+  bare empty tables.
+
 ## Where do I change X?
 
 | I want to... | Touch these files |
@@ -427,9 +485,10 @@ belongs to, filtered or not.
 | Add a field to `Account` (or `Category`/`CategoryGroup`) | New numbered file in `migrations/` (the column); `src/Domain/Account.hs` (the field, `mkAccount`, `unsafeReconstructAccount`); `src/Db/Field.hs` if it's a new scalar type; `src/Db/Account.hs` (the `FromRow` instance and every `SELECT`/`INSERT`); `src/Api/Accounts.hs` (the form field and the HTML table column) |
 | Change what happens at month rollover (e.g. partial carry, a cap) | `src/Domain/Budget.hs` (`rolloverCategoryMonth`, `rolloverMonths`); `test/Domain/BudgetSpec.hs` (the QuickCheck properties — change the law, change the test); `DECISIONS.md` §3/§5 (the invariant is written down there — keep it honest) |
 | Add a brand-new page/route (e.g. a Reports page) | New `src/Api/<Name>.hs`, same shape as `src/Api/Budget.hs` (routes type + handlers + a `render*`/`*Content` function); wire it into `RootApi`/`server` in `src/Api.hs`; add the nav link in `src/Api/Html.hs`; new `test/Api/<Name>Spec.hs` |
-| Add a new database table | New numbered file in `migrations/`; a new `src/Db/<Name>.hs` module (queries + a `FromRow` instance, following `src/Db/Assignment.hs` as the smallest example); update **this file** in the same commit (see the Documentation Standard in `CLAUDE.md`) |
+| Add a new database table | New numbered file in `migrations/`; a new `src/Db/<Name>.hs` module (queries + a `FromRow` instance, following `src/Db/Assignment.hs` as the smallest example); flag for the Architect to update **this file** after commit (see `GEMINI.md`) |
 | Add or update a vendored static asset (CSS/JS) | Drop the file in `static/`; it's already covered by the `static/*.css`/`static/*.js` globs in `package.yaml`'s `data-files` — no other wiring needed, it's served automatically at `/static/<filename>` |
 | Add a scheduled/recurring transaction or forecast rule (v0.2, see `DECISIONS.md` §10) | New `migrations/*_scheduled_items.sql`; a new, **pure** `src/Domain/Projection.hs` (no `IO`, reuses `rolloverCategoryMonth`/`available` — never edits them); a new `src/Db/ScheduledItem.hs`; a new `src/Api/Forecast.hs` mounted at `/forecast`. Critically: **never** make `Domain.Transaction`/`Domain.Budget`'s existing functions aware of "future" data — the real ledger stays strictly historical; a forecast is a read-only simulation layered on top, never a write to `transactions` |
+| Add recurring obligations, subscriptions, or sinking-fund auto-funding (`/recurring`, Track E — see `DECISIONS.md` §13 & `docs/phases/track-e-recurring-spec.md`) | Planned after Tracks B–D: `recurring_rules` targets natural budget categories (`Entertainment`, `Sport`, `Housing`) with an orthogonal `is_fixed_obligation` flag, `1/3` quarterly and `1/12` annual integer-cent sinking-fund accruals, `Funded`/`Paid`/`Due` status on `/recurring`, and an idempotent one-click *"Fund Recurring"* action writing standard `assignments` rows |
 | Change a validation rule (e.g. a name's max length) | `src/Domain/Validation.hs` (`nonEmptyName`) |
 | Add a new kind of domain error | `src/Domain/Error.hs` (`DomainError`); whichever `Domain`/`Db` function should raise it; the `Api` handler's `case result of Left ... -> ...` that turns it into an on-page message |
 | Change the SQLite pragmas, pool size, or backup behavior | `src/Db/Pool.hs` (pragmas, pool size); `src/Db/Backup.hs` (the online backup) |
@@ -439,3 +498,4 @@ belongs to, filtered or not.
 | Change what deleting/editing a transaction allows or blocks | `src/Db/Transaction.hs` — `withReplaceable` (the shared guard+atomicity), `deleteTransaction`, `updateInflow`/`updateSpending`/`updateTransfer`; `src/Domain/Error.hs` (`CannotModifyReconciledTransaction`); `test/Db/TransactionSpec.hs` |
 | Change month navigation, the local-date default, or add it to a new page | `src/Api/Monad.hs` (`localToday`, `resolveViewedMonth` — shared by every page with a `?month=`); `src/Domain/Types.hs` (`yearMonthToText`/`parseYearMonth`); the page's own `monthNav` function (deliberately a `<ul>`, never a `<nav>` — see "Month navigation, local dates, and the account filter") |
 | Change the account filter on `/transactions`, or add one to another page | `src/Api/Transactions.hs` — `parseAccountFilterText`, the `QueryParam "account" Text`, `accountFilterBanner`; linked from `src/Api/Accounts.hs`'s `accountRow` |
+| Change what archiving/unarchiving an account, category, or group allows or blocks | `src/Db/Account.hs` (`archiveAccount`, `unarchiveAccount`); `src/Db/Category.hs` (`archiveCategoryGroup`, `unarchiveCategoryGroup`, `archiveCategory`, `unarchiveCategory`, `insertCategory`'s `ArchivedCategoryGroup` check); `src/Api/Accounts.hs` (`archiveAccountHandler`, `unarchiveAccountHandler`, `archiveToggleButton`, `reconcileCell`); `src/Api/Categories.hs` (`archiveCategoryGroupHandler`, `archiveCategoryHandler`, `currentlyAvailable`); `src/Api/Budget.hs` (`assignHandler`, `isVisible`); `src/Api/Transactions.hs` (`accountChoices`, `categoryChoices`, `create*Handler` guards) |

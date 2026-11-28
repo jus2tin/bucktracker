@@ -1,8 +1,8 @@
 module Db.AccountSpec (spec) where
 
-import Db.Account (archiveAccount, getAccount, insertAccount, listAccounts)
+import Db.Account (archiveAccount, getAccount, insertAccount, listAccounts, unarchiveAccount)
 import Db.Setup (expectRight, withTestDb)
-import Domain.Account (Account (accId, accName, accType), isArchived)
+import Domain.Account (Account (accArchivedAt, accId, accName, accType), isArchived)
 import Domain.Error (DomainError (EmptyName))
 import Domain.Types (AccountType (Cash, Checking, Tracking))
 import Test.Hspec
@@ -37,3 +37,20 @@ spec = around withTestDb $
       case maybeArchived of
         Just archived -> isArchived archived `shouldBe` True
         Nothing -> expectationFailure "account disappeared after archiveAccount"
+
+    it "archiveAccount is idempotent: archiving twice doesn't move the timestamp" $ \conn -> do
+      acc <- insertAccount conn "Old Account" Cash >>= expectRight
+      archiveAccount conn (accId acc)
+      firstArchive <- getAccount conn (accId acc)
+      archiveAccount conn (accId acc)
+      secondArchive <- getAccount conn (accId acc)
+      fmap accArchivedAt secondArchive `shouldBe` fmap accArchivedAt firstArchive
+
+    it "unarchiveAccount clears archived_at" $ \conn -> do
+      acc <- insertAccount conn "Old Account" Cash >>= expectRight
+      archiveAccount conn (accId acc)
+      unarchiveAccount conn (accId acc)
+      maybeActive <- getAccount conn (accId acc)
+      case maybeActive of
+        Just active -> isArchived active `shouldBe` False
+        Nothing -> expectationFailure "account disappeared after unarchiveAccount"

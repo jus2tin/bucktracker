@@ -14,7 +14,7 @@ module Api.Budget
   ) where
 
 import Data.Int (Int64)
-import Data.List (find, foldl')
+import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
@@ -43,10 +43,11 @@ import qualified Db.Assignment as Db
 import qualified Db.Category as Db
 import qualified Db.Transaction as Db
 import Domain.Budget
-  ( Assignment (asgMonth)
-  , CategoryMonth (cmActivity, cmAssigned, cmCarriedIn, cmCategory)
+  ( CategoryMonth (cmActivity, cmAssigned, cmCarriedIn, cmCategory)
   , MonthlyBudget (..)
   , available
+  , budgetFor
+  , monthsThrough
   , rolloverMonths
   )
 import Domain.Category
@@ -54,12 +55,10 @@ import Domain.Category
   , CategoryGroup (cgId, cgName)
   , isArchivedCategory
   )
-import Domain.Transaction (Transaction, txDate)
 import Domain.Types
   ( Cents
   , CategoryId (CategoryId)
   , YearMonth
-  , dayToYearMonth
   , nextYearMonth
   , prevYearMonth
   , yearMonthToText
@@ -108,11 +107,13 @@ assignHandler hx form = do
       Nothing -> withError hx ym "Invalid amount."
       Just amt -> do
         categories <- withConn Db.listCategories
-        if not (any ((== cid) . catId) categories)
-          then withError hx ym "Unknown category."
-          else do
-            withConn (\conn -> Db.setAssignment conn cid ym amt)
-            renderFragment hx ym Nothing
+        case find ((== cid) . catId) categories of
+          Nothing -> withError hx ym "Unknown category."
+          Just cat
+            | isArchivedCategory cat -> withError hx ym "Cannot assign money to an archived category."
+            | otherwise -> do
+                withConn (\conn -> Db.setAssignment conn cid ym amt)
+                renderFragment hx ym Nothing
 
 withError :: Maybe Text -> YearMonth -> Text -> AppM (Html ())
 withError hx ym msg = renderFragment hx ym (Just msg)
@@ -139,31 +140,6 @@ renderFragment hx ym err = do
         "Budget"
         (budgetContent err ym groups categories (mbCategoryMonths viewedBudget) (mbReadyToAssign viewedBudget))
     )
-
--- | Every month from the earliest assignment/transaction through
--- whichever month is being viewed, ascending — what 'rolloverMonths'
--- needs to fold the carry/Ready-to-Assign all the way forward (rather
--- than restarting at 'zeroCents' every time, DECISIONS.md §8 H-5). With
--- no history yet, that's just @[viewedMonth]@; viewing a month before
--- any recorded activity, or after it, both still work — the range
--- always includes @viewedMonth@ itself.
-monthsThrough :: YearMonth -> [Assignment] -> [Transaction] -> [YearMonth]
-monthsThrough viewedMonth assignments txs = takeWhile (<= end) (iterate nextYearMonth start)
-  where
-    activityMonths = map asgMonth assignments ++ map (dayToYearMonth . txDate) txs
-    start = foldl' min viewedMonth activityMonths
-    end = foldl' max viewedMonth activityMonths
-
--- | The 'MonthlyBudget' for @viewedMonth@ out of what 'rolloverMonths'
--- folded. The 'Nothing' branch is unreachable: 'monthsThrough' always
--- includes @viewedMonth@, so 'rolloverMonths' always produces a
--- matching entry — kept total (no 'Prelude.head'/partial pattern)
--- rather than relying on that invariant with a crash.
-budgetFor :: YearMonth -> [MonthlyBudget] -> MonthlyBudget
-budgetFor viewedMonth budgets =
-  case find ((== viewedMonth) . mbMonth) budgets of
-    Just mb -> mb
-    Nothing -> MonthlyBudget viewedMonth [] zeroCents
 
 budgetContent :: Maybe Text -> YearMonth -> [CategoryGroup] -> [Category] -> [CategoryMonth] -> Cents -> Html ()
 budgetContent err ym groups categories categoryMonths rta = div_ [id_ "budget-content"] $ do

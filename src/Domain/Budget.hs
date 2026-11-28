@@ -16,6 +16,8 @@ module Domain.Budget
   , budgetBalancesAccounts
   , MonthlyBudget (..)
   , rolloverMonths
+  , monthsThrough
+  , budgetFor
   ) where
 
 import Data.List (find)
@@ -35,6 +37,7 @@ import Domain.Types
   , YearMonth
   , dayToYearMonth
   , negateCents
+  , nextYearMonth
   , zeroCents
   )
 
@@ -236,3 +239,30 @@ rolloverMonths accounts categoryIds months assignments txs = reverse (foldl' ste
           [ buildCategoryMonth accounts cid month (carriedInOf cid) assignments txs | cid <- categoryIds ]
       , mbReadyToAssign = readyToAssign rtaCarriedIn accounts month assignments txs
       }
+
+-- | Every month from the earliest assignment/transaction through
+-- whichever month is being viewed, ascending — what 'rolloverMonths'
+-- needs to fold the carry/Ready-to-Assign all the way forward (rather
+-- than restarting at 'zeroCents' every time, DECISIONS.md §8 H-5). With
+-- no history yet, that's just @[viewedMonth]@; viewing a month before
+-- any recorded activity, or after it, both still work — the range
+-- always includes @viewedMonth@ itself. Shared by 'Api.Budget' (to
+-- render the viewed month) and 'Api.Categories' (to check a category's
+-- *current* balance before allowing it to be archived).
+monthsThrough :: YearMonth -> [Assignment] -> [Transaction] -> [YearMonth]
+monthsThrough viewedMonth assignments txs = takeWhile (<= end) (iterate nextYearMonth start)
+  where
+    activityMonths = map asgMonth assignments ++ map (dayToYearMonth . txDate) txs
+    start = foldl' min viewedMonth activityMonths
+    end = foldl' max viewedMonth activityMonths
+
+-- | The 'MonthlyBudget' for @viewedMonth@ out of what 'rolloverMonths'
+-- folded. The 'Nothing' branch is unreachable: 'monthsThrough' always
+-- includes @viewedMonth@, so 'rolloverMonths' always produces a
+-- matching entry — kept total (no 'Prelude.head'/partial pattern)
+-- rather than relying on that invariant with a crash.
+budgetFor :: YearMonth -> [MonthlyBudget] -> MonthlyBudget
+budgetFor viewedMonth budgets =
+  case find ((== viewedMonth) . mbMonth) budgets of
+    Just mb -> mb
+    Nothing -> MonthlyBudget viewedMonth [] zeroCents
