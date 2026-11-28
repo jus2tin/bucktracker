@@ -112,6 +112,11 @@ spec = with withTestApp $ do
       liftIO (bodyContains "/budget?month=2026-05" response `shouldBe` True)
       liftIO (bodyContains "/budget?month=2026-07" response `shouldBe` True)
 
+    it "falls back to today's local month on an out-of-range ?month=, instead of hanging or OOMing (AUDIT-01)" $ do
+      month <- liftIO thisMonth
+      response <- get "/budget?month=99999999-01"
+      liftIO (bodyContains month response `shouldBe` True)
+
     it "rolls over a category's carried-in balance into a later viewed month" $ do
       _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
       _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
@@ -129,7 +134,11 @@ spec = with withTestApp $ do
       afterArchive <- get "/budget"
       liftIO (bodyContains "OldCategory" afterArchive `shouldBe` False)
 
-    it "still shows an archived category that carries a nonzero balance" $ do
+    it "refuses to archive (and so still shows) a category that carries a nonzero balance (DECISIONS.md §11)" $ do
+      -- Archiving a nonzero-balance category is rejected server-side
+      -- (Track A Step 6, see Api.Categories.archiveCategoryHandler) —
+      -- it stays Active and visible, not silently archived-but-visible
+      -- as it would have been before that guard existed.
       _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
       _ <- postHtmlForm "/categories" [("categoryName", "OldCategory"), ("groupId", "1")]
       month <- liftIO thisMonth
@@ -137,6 +146,16 @@ spec = with withTestApp $ do
       _ <- postHtmlForm "/categories/1/archive" []
       response <- get "/budget"
       liftIO (bodyContains "OldCategory" response `shouldBe` True)
+
+  describe "assigning to an archived category" $
+    it "is rejected, without changing anything" $ do
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "OldCategory"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories/1/archive" []
+      month <- liftIO thisMonth
+      response <- postHtmlForm "/budget/assign" [("assignCategoryId", "1"), ("assignAmount", "50.00"), ("assignMonth", month)]
+      liftIO (bodyContains "archived category" response `shouldBe` True)
+      liftIO (bodyContains "50.00" response `shouldBe` False)
 
 bodyContains :: String -> SResponse -> Bool
 bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: HLint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run HLint
+        uses: haskell-actions/hlint-scan@v2
+        with:
+          path: "src/ app/ test/"
+
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      STACK_ROOT: ${{ runner.os == 'Windows' && 'C:\sr' || '/home/runner/.stack' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Stack root & snapshot dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.STACK_ROOT }}
+            .stack-work
+          key: stack-${{ runner.os }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'package.yaml') }}
+          restore-keys: |
+            stack-${{ runner.os }}-
+
+      # Note: append --ghc-options="-Werror" in Track B Step 12 once
+      # package.yaml unused-package and Db.* -Worphans warnings are cleared
+      # (see docs/phases/track-b-spec.md §4.1).
+      - name: Build and run test suite
+        run: stack test --fast --test-arguments="--format=progress"
+
+      - name: Verify CLI integrity-check flag on fresh DB (active once Track B Step 11 lands)
+        shell: bash
+        run: |
+          if grep -q -- '--integrity-check' app/Main.hs; then
+            TMP_DB="$(mktemp -u).db"
+            BUCKTRACKER_DB_PATH="$TMP_DB" stack exec bucktracker-exe -- --integrity-check
+            rm -f "$TMP_DB" "$TMP_DB-wal" "$TMP_DB-shm"
+          else
+            echo "Skipping CLI --integrity-check smoke test until Track B Step 11 lands."
+          fi

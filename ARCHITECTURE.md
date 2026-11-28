@@ -57,15 +57,22 @@ is right for content-hashed CDN assets but wrong here: these files have
 no hash in their names and change on every Track A step, and a
 year-long browser cache silently serving a stale `app.js` past a
 rebuild is exactly the kind of bug a live-browser check (CLAUDE.md
-"Run the app") exists to catch, not reproduce. So `GET
-/static/pico.min.css`, `/static/htmx.min.js`, `/static/alpine-csp.min.js`,
-and our own `/static/app.js` all just work, including in tests
-(`Api.Setup` resolves the same `appStaticDir` the real app does).
-`Api.Html.page`
-links all four from `<head>` — HTMX and Alpine deferred, so they
-execute (in that order) after the DOM parses but before
-`DOMContentLoaded`. No CDN, no network dependency: Bucktracker works
-fully offline.
+"Run the app") exists to catch, not reproduce. So `GET /static/pico.min.css`, `/static/app.css`, `/static/htmx.min.js`,
+`/static/alpine-csp.min.js`, and our own `/static/app.js` all just work,
+including in tests (`Api.Setup` resolves the same `appStaticDir` the
+real app does). `Api.Html.page` links all five from `<head>` — zero
+inline `<style>` elements (all app overrides, `.htmx-indicator`, and
+`[x-cloak]` live in `/static/app.css`, paired with `<meta
+name="htmx-config" content='{"includeIndicatorStyles":false}'>` so HTMX
+never injects an inline stylesheet at boot either), and `htmx.min.js`,
+`app.js`, and `alpine-csp.min.js` deferred in that exact order so
+`Alpine.data(...)` components register before Alpine initializes. Server
+values passed into Alpine components always travel via `data-*`
+attributes (`data-initial-value`, `data-cleared-cents`,
+`data-archived-extra`), never string-interpolated into `x-*` attributes,
+keeping every page clean under strict `script-src 'self'; style-src
+'self'` Content-Security-Policy. No CDN, no network dependency:
+Bucktracker works fully offline.
 
 ## Request lifecycle: clicking "Add expense"
 
@@ -91,14 +98,18 @@ Transactions page fills in the spending form and clicks submit.
    all).
 
 3. **The handler does HTTP-shaped validation.**
-   `createSpendingHandler` turns the form's `Text` fields into real
-   types: an `AccountId`, a `CategoryId`, a `Day`, a `Cents` amount —
-   using small total parsers (`parseAccountId`, `Api.Money.parsePositiveEuros`,
-   `parseIsoDate`; never `Prelude.read`, which can crash on bad input).
-   It also checks the account and category actually exist. Anything
-   wrong here (unknown account, "not a number" in the amount field)
-   short-circuits straight to an error message — the database is never
-   touched.
+   `createSpendingHandler` (via `withValidSpending`) turns the form's
+   `Text` fields into real types: an `AccountId`, `CategoryId`s, a `Day`
+   (bounded to years `1900..2200` via `parseIsoDate`, matching
+   `Domain.Types.mkYearMonth`), a validated payee (`validatePayee`:
+   trimmed, `<= 160` chars, no control characters), and `Cents` amounts
+   — using small total parsers (`parseAccountId`,
+   `Api.Money.parseNonZeroSignedEuros`, `parseIsoDate`; never
+   `Prelude.read`, which can crash on bad input). It rejects unequal
+   `lineCategoryId`/`lineAmount` field counts rather than silently
+   truncating via `zip`, and checks the account and categories actually
+   exist and are not archived. Anything wrong here short-circuits
+   straight to an error message — the database is never touched.
 
 4. **The Db layer does the real write.** The handler calls
    `Db.insertSpending` (`src/Db/Transaction.hs`), which runs inside one
@@ -158,8 +169,13 @@ impossible to *construct*, rather than validating it after the fact.
 - `Account`/`CategoryGroup`/`Category`/`YearMonth` don't export their
   raw constructors at all. The only way to build one from outside
   `Domain/` is through a smart constructor (`mkAccount`,
-  `mkYearMonth`, …) that validates as it goes, or — for the `Db` layer
-  reading already-valid data back out of storage — a clearly-named
+  `mkYearMonth`, …) that validates as it goes (`mkYearMonth` bounds
+  months to `1..12` and years to `1900..2200` via `InvalidMonth` /
+  `InvalidYear`; `Domain.Validation.nonEmptyName` trims whitespace,
+  caps names at `80` characters, and rejects control characters;
+  `mkTransferPair` enforces strictly positive amounts via
+  `TransferAmountMustBePositive`), or — for the `Db` layer reading
+  already-valid data back out of storage — a clearly-named
   `unsafeReconstructAccount`-style function that skips validation on
   purpose and says so in its name.
 
@@ -251,14 +267,16 @@ isn't stuck there — assigning it a **negative** amount (`-€50.00`, via
 `Api.Money.parseSignedEuros`) sends that €50 back to Ready to Assign:
 `available = €50 (carried in) + (-€50) (assigned) + €0 = €0`, and
 `readyToAssign`'s `negateCents (assignedTotal month assignments)` term
-flips the sign, adding the €50 back. The `/budget` page's "Assigned"
-cell is editable inline (click it, type, Enter or Escape) via an
-Alpine component (`static/app.js`'s `inlineAssign`, registered through
-`Alpine.data` — the vendored build is CSP-restricted, so there's no
-inline `x-data="{ ... }"` object literal and every `x-on` handler calls
-a named method with `()`, e.g. `x-on:click="startEdit()"`, never a
-bare reference); without JS, it's still an ordinary `<form>` whose
-single text input submits on Enter.
+flips the sign, adding the €50 back. The `/budget` page's "Assigned" cell is editable inline (click it,
+type, Enter or Escape) via an Alpine component (`static/app.js`'s
+`inlineAssign`, registered through `Alpine.data` with
+`x-data="inlineAssign()"` and reading its server-rendered starting text
+from `data-initial-value` — the vendored build is CSP-restricted, so
+there's no inline `x-data="{ ... }"` object literal, no dynamic string
+interpolation inside `x-*`, and every `x-on` handler calls a named
+method with `()`, e.g. `x-on:click="startEdit()"`, never a bare
+reference); without JS, it's still an ordinary `<form>` whose single
+text input submits on Enter.
 
 ### Split transactions
 
@@ -281,15 +299,14 @@ line's category/amount inputs share the same `name` attributes
 (`lineCategoryId`/`lineAmount`) regardless of how many lines exist, and
 `Api.Transactions.NewSpendingForm`'s hand-written `FromForm` instance
 collects all of them via `Web.FormUrlEncoded.lookupAll` rather than
-`Generic`-deriving fixed field names. The Alpine `splitEditor`
-component (`static/app.js`) adds/removes rows by cloning/removing a
-plain `.split-line` DOM node — deliberately not `x-for`/`<template>`,
-which the vendored Alpine CSP build's templating support is less
-certain to handle reliably — and shows a live, client-side-only
-"Unallocated: €X" preview as you type (a receipt total minus the
-lines' sum, in integer cents); Haskell never trusts that figure and
-still derives `transactionAmount` strictly from whatever lines actually
-arrive (invariant 3).
+`Generic`-deriving fixed field names. The Alpine `splitEditor` component (`static/app.js`) adds/removes rows
+by cloning/removing a plain `.split-line` DOM node — stripping any
+`option[data-archived-extra]` and prefilled `value` attribute from cloned
+rows so a newly added split line never inherits an archived category —
+and shows a live, client-side-only "Unallocated: €X" preview as you type
+(a receipt total minus the lines' sum, in integer cents); Haskell never
+trusts that figure and still derives `transactionAmount` strictly from
+whatever lines actually arrive (invariant 3).
 
 A line's amount is *signed*: typing a negative amount
 (`Api.Money.parseNonZeroSignedEuros`) records a refund/credit against
@@ -345,11 +362,13 @@ account or a negative-balance liability can reconcile too; an Alpine
 `clearedBalance` off a `data-cleared-cents` attribute the server
 renders and shows a live "Cleared − Statement = Difference" preview as
 you type, before you even click "Reconcile" — again purely a preview,
-never the actual comparison. On a match,
-`Db.Transaction.reconcileAccount` locks every `Cleared` transaction on
-that account in as `Reconciled`; on a mismatch, nothing is written at
-all — you get both numbers back to go find the missing, duplicate, or
-still-uncleared transaction yourself.
+never the actual comparison. On submission, `Db.Transaction.reconcileAccountIfMatches` runs inside a
+single SQLite transaction: it loads the account's transactions, compares
+`clearedBalance` against `statementBalance`, and on a match locks every
+`Cleared` transaction on that account in as `Reconciled`; on a mismatch,
+nothing is written at all and `Left actualClearedBalance` comes back so
+you can go find the missing, duplicate, or still-uncleared transaction
+yourself.
 
 ### Entry drawers and keyboard shortcuts
 
@@ -369,23 +388,28 @@ drawer is open, everywhere on the page.
 A transaction's row on `/transactions` has an "Edit" `<details>`
 drawer (pre-filled, reusing the same create-form renderers and the
 split editor) and a "Delete" button with `hx-confirm`; neither renders
-once the transaction is `Reconciled`. `Db.Transaction.deleteTransaction`
-and the `update*` family (`updateInflow`/`updateSpending`/
-`updateTransfer`) both go through a shared `withReplaceable`: look up
-the transaction, reject with `CannotModifyReconciledTransaction` if
-it's `Reconciled`, otherwise delete its old row(s) (both legs plus the
-shared `transfers` row, for a transfer) and — for an edit — insert the
-new ones, all in one SQL transaction. An edit is therefore delete-
-then-reinsert through the exact same raw row-insert helpers a fresh
-create uses, not a bespoke `UPDATE` that would have to re-derive every
-invariant a create already enforces (on-budget-only, distinct
-accounts, matching budget status); each `update*` repeats its matching
-`insert*`'s own validation before calling `withReplaceable`, since the
-raw helpers themselves do none. The edited transaction gets a *new*
-`TransactionId` — nothing in Bucktracker outside of one page render
-depends on an id staying stable across an edit (and SQLite's own rowid
-allocator can reuse a deleted row's id anyway, so "the old id is gone"
-isn't even a safe assumption to test for).
+once the transaction is locked (`isLockedTransaction`: either the row
+itself is `Reconciled`, or it is a `TransferLeg` whose sibling leg on
+the counterpart account is already `Reconciled`).
+`Db.Transaction.deleteTransaction` and the `update*` family
+(`updateInflow`/`updateSpending`/`updateTransfer`) all go through a
+shared `withReplaceable` inside one SQLite transaction: look up the
+transaction (plus `transferSiblingsOf` when it's a transfer), reject
+with `CannotModifyReconciledTransaction` if the row or any sibling
+transfer leg is `Reconciled`, verify the row's existing categorization
+matches the requested edit route (`TransactionKindMismatch` blocks
+cross-kind overwrites), delete its old row(s) (both legs plus the shared
+`transfers` row, for a transfer), and — for an edit — insert the new
+ones through the exact same raw row-insert helpers a fresh create uses.
+`updateInflow` and `updateSpending` preserve `txImportHash` whenever the
+transaction stays on the same account (`preservedImportHash`, dropping
+it if moved to another account), and `updateTransfer` preserves each
+leg's independent `Uncleared`/`Cleared` status per account rather than
+clobbering one leg with the other's status. The edited transaction gets
+a *new* `TransactionId` — nothing in Bucktracker outside of one page
+render depends on an id staying stable across an edit (and SQLite's own
+rowid allocator can reuse a deleted row's id anyway, so "the old id is
+gone" isn't even a safe assumption to test for).
 
 ### Month navigation, local dates, and the account filter
 
@@ -420,6 +444,69 @@ filtered doesn't silently drop it. The register also gained the
 missing **Account** column — every row now shows which account it
 belongs to, filtered or not.
 
+### Archiving, unarchiving, and entity guards
+
+Accounts, category groups, and categories are never hard-deleted —
+historical transactions and past monthly rollovers still reference
+them, so "deleting" is soft-delete via a nullable `archived_at`
+timestamp (`DECISIONS.md` §7, §11).
+
+Archiving is **two-way** and **guarded** on both the UI and server
+sides:
+
+- **Confirmation & undo:** Every active account, category group, and
+  category renders an `Archive` button gated by `hx-confirm` so a stray
+  click doesn't immediately hide an entity; once archived, the same
+  column switches to an `Unarchive` button (`Db.Account.unarchiveAccount`,
+  `Db.Category.unarchiveCategoryGroup`, `Db.Category.unarchiveCategory`).
+  Both `archive*` (`WHERE id = ? AND archived_at IS NULL`) and
+  `unarchive*` (`WHERE id = ? AND archived_at IS NOT NULL`) are
+  idempotent.
+- **Preconditions before archiving:**
+  - An **account** cannot be archived while `Domain.Budget.accountBalance`
+    is non-zero **or** while any transaction on it is not yet
+    `Reconciled` (`Api.Accounts.archiveAccountHandler`) — hiding an
+    account that still holds money or unreconciled rows would either
+    leave funds invisible in entry pickers or permanently hide the
+    `Reconcile` form (`reconcileCell`) before those rows were reconciled.
+  - A **category** cannot be archived while its folded
+    `Domain.Budget.available` balance is non-zero in the current month
+    **or any future month** (`Api.Categories.archiveCategoryHandler` via
+    `hasNonZeroBalanceFromNowOn`, using `Domain.Budget.monthsThrough` +
+    `rolloverMonths` across all months `>= today`, preventing future
+    assignments from being stranded). On `/budget`, archived categories
+    with zero `Carried In`, `Assigned`, `Activity`, and `Available` are
+    hidden from the table while remaining inside `rolloverMonths` so
+    Invariant 1 holds across the entire ledger history.
+  - A **category group** cannot be archived while any child category in
+    it is still active (`Api.Categories.archiveCategoryGroupHandler`).
+- **Server-side guards against writing to archived entities:**
+  - Creating a category inside an archived group is rejected by
+    `Db.Category.insertCategory` (`Left ArchivedCategoryGroup`).
+  - Assigning money to an archived category is rejected by
+    `Api.Budget.assignHandler`.
+  - Creating a new inflow, spending transaction, or transfer against an
+    archived account (or an archived category on any split line) is
+    rejected server-side in `Api.Transactions` (`createInflowHandler`,
+    `createSpendingHandler`, `createTransferHandler`), not merely hidden
+    in `<select>` menus. The spending create form also filters its
+    account picker to **active on-budget accounts only**
+    (`accountChoices True Nothing`), never offering `Tracking` accounts
+    that would fail `CategorizedTransactionRequiresOnBudgetAccount`.
+  - **Edit-form exception (`accountChoices` / `categoryChoices` &
+    `movesOntoArchived*`):** Editing an *existing* historical
+    transaction on a since-archived account or category appends that one
+    entity (labelled `"(archived)"`) back into the edit form's `<select>`
+    so opening and saving an edit never silently reassigns the
+    transaction to a different active option — while `movesOntoArchivedAccount`,
+    `movesOntoArchivedCategory`, and `movesOntoArchivedTransferAccount`
+    still reject moving a transaction onto a *different*, newly chosen
+    archived account or category.
+- **First-run onboarding:** When no accounts or category groups/categories
+  exist yet, `/accounts` and `/categories` render plain-English
+  `onboardingBanner` prompts explaining what to create first instead of
+  bare empty tables.
+
 ## Where do I change X?
 
 | I want to... | Touch these files |
@@ -427,15 +514,17 @@ belongs to, filtered or not.
 | Add a field to `Account` (or `Category`/`CategoryGroup`) | New numbered file in `migrations/` (the column); `src/Domain/Account.hs` (the field, `mkAccount`, `unsafeReconstructAccount`); `src/Db/Field.hs` if it's a new scalar type; `src/Db/Account.hs` (the `FromRow` instance and every `SELECT`/`INSERT`); `src/Api/Accounts.hs` (the form field and the HTML table column) |
 | Change what happens at month rollover (e.g. partial carry, a cap) | `src/Domain/Budget.hs` (`rolloverCategoryMonth`, `rolloverMonths`); `test/Domain/BudgetSpec.hs` (the QuickCheck properties — change the law, change the test); `DECISIONS.md` §3/§5 (the invariant is written down there — keep it honest) |
 | Add a brand-new page/route (e.g. a Reports page) | New `src/Api/<Name>.hs`, same shape as `src/Api/Budget.hs` (routes type + handlers + a `render*`/`*Content` function); wire it into `RootApi`/`server` in `src/Api.hs`; add the nav link in `src/Api/Html.hs`; new `test/Api/<Name>Spec.hs` |
-| Add a new database table | New numbered file in `migrations/`; a new `src/Db/<Name>.hs` module (queries + a `FromRow` instance, following `src/Db/Assignment.hs` as the smallest example); update **this file** in the same commit (see the Documentation Standard in `CLAUDE.md`) |
+| Add a new database table | New numbered file in `migrations/`; a new `src/Db/<Name>.hs` module (queries + a `FromRow` instance, following `src/Db/Assignment.hs` as the smallest example); flag for the Architect to update **this file** after commit (see `GEMINI.md`) |
 | Add or update a vendored static asset (CSS/JS) | Drop the file in `static/`; it's already covered by the `static/*.css`/`static/*.js` globs in `package.yaml`'s `data-files` — no other wiring needed, it's served automatically at `/static/<filename>` |
 | Add a scheduled/recurring transaction or forecast rule (v0.2, see `DECISIONS.md` §10) | New `migrations/*_scheduled_items.sql`; a new, **pure** `src/Domain/Projection.hs` (no `IO`, reuses `rolloverCategoryMonth`/`available` — never edits them); a new `src/Db/ScheduledItem.hs`; a new `src/Api/Forecast.hs` mounted at `/forecast`. Critically: **never** make `Domain.Transaction`/`Domain.Budget`'s existing functions aware of "future" data — the real ledger stays strictly historical; a forecast is a read-only simulation layered on top, never a write to `transactions` |
-| Change a validation rule (e.g. a name's max length) | `src/Domain/Validation.hs` (`nonEmptyName`) |
+| Add recurring obligations, subscriptions, or sinking-fund auto-funding (`/recurring`, Track E — see `DECISIONS.md` §13 & `docs/phases/track-e-recurring-spec.md`) | Planned after Tracks B–D: `recurring_rules` targets natural budget categories (`Entertainment`, `Sport`, `Housing`) with an orthogonal `is_fixed_obligation` flag, `1/3` quarterly and `1/12` annual integer-cent sinking-fund accruals, `Funded`/`Paid`/`Due` status on `/recurring`, and an idempotent one-click *"Fund Recurring"* action writing standard `assignments` rows |
+| Change a validation rule (e.g. a name's or payee's max length) | `src/Domain/Validation.hs` (`nonEmptyName` — trimmed, `<= 80` chars, no control chars; `validatePayee` — trimmed, `<= 160` chars, no control chars) |
 | Add a new kind of domain error | `src/Domain/Error.hs` (`DomainError`); whichever `Domain`/`Db` function should raise it; the `Api` handler's `case result of Left ... -> ...` that turns it into an on-page message |
 | Change the SQLite pragmas, pool size, or backup behavior | `src/Db/Pool.hs` (pragmas, pool size); `src/Db/Backup.hs` (the online backup) |
 | Change an env var, its default, or the port | `src/Config.hs`; then update `CLAUDE.md`'s "Config" line and `README.md` |
 | Change how euros are parsed/formatted on a page | `src/Api/Money.hs` — `parseSignedEuros`/`parseNonZeroSignedEuros`/`parsePositiveEuros`/`centsToEuroText`, shared by every `Api.*` module (DECISIONS.md §12, Architect review S-2). All euro fields now go through one of these three; which one encodes that field's legal range (e.g. a reconcile statement balance or a budget assignment can be negative or zero via `parseSignedEuros`, a split line/inflow can be negative but never exactly zero via `parseNonZeroSignedEuros`, a transfer must be strictly positive via `parsePositiveEuros`) |
-| Add or remove a split line, or change how many a transaction can have | `src/Api/Transactions.hs` — `NewSpendingForm`'s `FromForm` instance (`lookupAll "lineCategoryId"`/`"lineAmount"`) collects however many `lineCategoryId`/`lineAmount` pairs the form submits; `parseSplitLines` parses them; nothing caps the count server-side. Client-side add/remove rows: `static/app.js`'s `splitEditor` Alpine component |
-| Change what deleting/editing a transaction allows or blocks | `src/Db/Transaction.hs` — `withReplaceable` (the shared guard+atomicity), `deleteTransaction`, `updateInflow`/`updateSpending`/`updateTransfer`; `src/Domain/Error.hs` (`CannotModifyReconciledTransaction`); `test/Db/TransactionSpec.hs` |
-| Change month navigation, the local-date default, or add it to a new page | `src/Api/Monad.hs` (`localToday`, `resolveViewedMonth` — shared by every page with a `?month=`); `src/Domain/Types.hs` (`yearMonthToText`/`parseYearMonth`); the page's own `monthNav` function (deliberately a `<ul>`, never a `<nav>` — see "Month navigation, local dates, and the account filter") |
+| Add or remove a split line, or change how many a transaction can have | `src/Api/Transactions.hs` — `NewSpendingForm`'s `FromForm` instance (`lookupAll "lineCategoryId"`/`"lineAmount"`) collects however many `lineCategoryId`/`lineAmount` pairs the form submits (`withValidSpending` rejects unequal counts); `parseSplitLines` parses them; nothing caps the count server-side. Client-side add/remove rows: `static/app.js`'s `splitEditor` Alpine component |
+| Change what deleting/editing a transaction allows or blocks | `src/Db/Transaction.hs` — `withReplaceable` (the shared `withTransaction` guard + `transferSiblingsOf` lock check), `deleteTransaction`, `updateInflow`/`updateSpending`/`updateTransfer` (`preservedImportHash`, `expectInflow`/`expectCategorized`/`expectTransferLeg`); `src/Api/Transactions.hs` (`isLockedTransaction`, `movesOntoArchived*`); `src/Domain/Error.hs` (`CannotModifyReconciledTransaction`, `TransactionKindMismatch`); `test/Db/TransactionSpec.hs` |
+| Change month navigation, the local-date default, or add it to a new page | `src/Api/Monad.hs` (`localToday`, `resolveViewedMonth` — shared by every page with a `?month=`); `src/Domain/Types.hs` (`mkYearMonth` `[1900, 2200]` year bound, `yearMonthToText`/`parseYearMonth`); `src/Api/Transactions.hs` (`parseIsoDate`); the page's own `monthNav` function (deliberately a `<ul>`, never a `<nav>` — see "Month navigation, local dates, and the account filter") |
 | Change the account filter on `/transactions`, or add one to another page | `src/Api/Transactions.hs` — `parseAccountFilterText`, the `QueryParam "account" Text`, `accountFilterBanner`; linked from `src/Api/Accounts.hs`'s `accountRow` |
+| Change what archiving/unarchiving an account, category, or group allows or blocks | `src/Db/Account.hs` (`archiveAccount`, `unarchiveAccount`); `src/Db/Category.hs` (`archiveCategoryGroup`, `unarchiveCategoryGroup`, `archiveCategory`, `unarchiveCategory`, `insertCategory`'s `ArchivedCategoryGroup` check); `src/Api/Accounts.hs` (`archiveAccountHandler`, `unarchiveAccountHandler`, `archiveToggleButton`, `reconcileCell`); `src/Api/Categories.hs` (`archiveCategoryGroupHandler`, `archiveCategoryHandler`, `hasNonZeroBalanceFromNowOn`); `src/Api/Budget.hs` (`assignHandler`, `isVisible`); `src/Api/Transactions.hs` (`accountChoices`, `categoryChoices`, `create*Handler` & `movesOntoArchived*` guards) |

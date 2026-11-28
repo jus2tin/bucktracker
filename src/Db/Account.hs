@@ -3,6 +3,7 @@ module Db.Account
   , getAccount
   , listAccounts
   , archiveAccount
+  , unarchiveAccount
   ) where
 
 import Data.Maybe (listToMaybe)
@@ -50,7 +51,17 @@ getAccount conn aid = do
 listAccounts :: Connection -> IO [Account]
 listAccounts conn = query_ conn "SELECT id, name, type, archived_at FROM accounts ORDER BY id"
 
+-- | Idempotent (@AND archived_at IS NULL@): archiving an already-
+-- archived account a second time is a no-op rather than overwriting its
+-- original @archived_at@ timestamp with a later one (DECISIONS.md §11).
 archiveAccount :: Connection -> AccountId -> IO ()
 archiveAccount conn aid = do
   now <- getCurrentTime
-  execute conn "UPDATE accounts SET archived_at = ? WHERE id = ?" (now, aid)
+  execute conn "UPDATE accounts SET archived_at = ? WHERE id = ? AND archived_at IS NULL" (now, aid)
+
+-- | The undo for 'archiveAccount' (DECISIONS.md §11, "Archiving is a
+-- one-way trip" — now fixed): also idempotent, and a no-op on an
+-- already-active account.
+unarchiveAccount :: Connection -> AccountId -> IO ()
+unarchiveAccount conn aid =
+  execute conn "UPDATE accounts SET archived_at = NULL WHERE id = ? AND archived_at IS NOT NULL" (Only aid)

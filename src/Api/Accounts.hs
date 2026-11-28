@@ -15,7 +15,19 @@ import Lucid.Base (makeAttribute)
 import Servant
 import Servant.HTML.Lucid (HTML)
 
-import Api.Html (errorBanner, hxPost_, hxSwap_, hxTarget_, pageOrFragment, successBanner, xData_, xModel_, xOn_, xText_)
+import Api.Html
+  ( errorBanner
+  , hxConfirm_
+  , hxPost_
+  , hxSwap_
+  , hxTarget_
+  , pageOrFragment
+  , successBanner
+  , xData_
+  , xModel_
+  , xOn_
+  , xText_
+  )
 import Api.Monad (AppM, withConn)
 import Api.Money (centsToEuroText, parseSignedEuros)
 import qualified Db.Account as Db
@@ -23,14 +35,15 @@ import qualified Db.Transaction as Db
 import Domain.Account (Account (accId, accName, accType), isArchived)
 import Domain.Budget (accountBalance, clearedBalance)
 import Domain.Error (DomainError (EmptyName))
-import Domain.Transaction (Transaction)
+import Domain.Transaction (Transaction (txStatus))
 import Domain.Types
   ( AccountId (AccountId)
   , AccountType
-  , Cents
+  , TransactionStatus (Reconciled)
   , accountTypeFromText
   , accountTypeToText
   , centsValue
+  , zeroCents
   )
 import Web.FormUrlEncoded (FromForm)
 
@@ -38,6 +51,7 @@ type AccountsApi =
   "accounts" :> Get '[HTML] (Html ())
     :<|> Header "HX-Request" Text :> "accounts" :> ReqBody '[FormUrlEncoded] NewAccountForm :> Post '[HTML] (Html ())
     :<|> Header "HX-Request" Text :> "accounts" :> Capture "id" Int64 :> "archive" :> Post '[HTML] (Html ())
+    :<|> Header "HX-Request" Text :> "accounts" :> Capture "id" Int64 :> "unarchive" :> Post '[HTML] (Html ())
     :<|> Header "HX-Request" Text :> "accounts" :> Capture "id" Int64 :> "reconcile" :> ReqBody '[FormUrlEncoded] ReconcileForm :> Post '[HTML] (Html ())
 
 -- | Field names must match the @name@ attributes of 'newAccountForm'
@@ -61,6 +75,7 @@ accountsServer =
   listAccountsHandler
     :<|> createAccountHandler
     :<|> archiveAccountHandler
+    :<|> unarchiveAccountHandler
     :<|> reconcileAccountHandler
 
 listAccountsHandler :: AppM (Html ())
@@ -76,20 +91,47 @@ createAccountHandler hx form = case accountTypeFromText (accountType form) of
       Left _ -> withError hx "Could not create account."
       Right _ -> renderFragment hx Nothing Nothing
 
+-- | Blocks archiving an account that still has a non-zero balance, or
+-- that still has any not-yet-'Reconciled' transaction even at a zero
+-- balance (DECISIONS.md §11, AUDIT-04): archiving hides it from every
+-- "new entry" picker and permanently hides 'reconcileCell', so an
+-- account with offsetting Uncleared rows (e.g. +€100/-€100) would
+-- otherwise lose its only path to ever reconciling those rows. A no-op
+-- (not an error) on an unknown id, consistent with every other
+-- archive/unarchive handler.
 archiveAccountHandler :: Maybe Text -> Int64 -> AppM (Html ())
 archiveAccountHandler hx rawId = do
-  withConn (\conn -> Db.archiveAccount conn (AccountId rawId))
+  let aid = AccountId rawId
+  txs <- withConn (\conn -> Db.listTransactionsForAccount conn aid)
+  if accountBalance aid txs /= zeroCents
+    then withError hx "Cannot archive an account with a non-zero balance."
+    else
+      if any ((/= Reconciled) . txStatus) txs
+        then withError hx "Cannot archive an account with unreconciled transactions."
+        else do
+          withConn (\conn -> Db.archiveAccount conn aid)
+          renderFragment hx Nothing Nothing
+
+unarchiveAccountHandler :: Maybe Text -> Int64 -> AppM (Html ())
+unarchiveAccountHandler hx rawId = do
+  withConn (\conn -> Db.unarchiveAccount conn (AccountId rawId))
   renderFragment hx Nothing Nothing
 
 -- | The reconciliation workflow (DECISIONS.md §4/§3): compares
 -- 'Domain.Budget.clearedBalance' (everything the register has marked
 -- Cleared/Reconciled on this account, via the per-row "Clear" toggle on
 -- the Transactions page) against the balance the user read off their
--- bank statement. On a match, 'Db.Transaction.reconcileAccount' locks
--- in every Cleared transaction as Reconciled; on a mismatch, nothing is
--- written — the user gets the two numbers back to go find the
--- discrepancy themselves (reconciliation is a pure comparison, not a
--- type of its own, see DECISIONS.md §3).
+-- bank statement. On a match, the write locks in every Cleared
+-- transaction as Reconciled; on a mismatch, nothing is written — the
+-- user gets the two numbers back to go find the discrepancy themselves
+-- (reconciliation is a pure comparison, not a type of its own, see
+-- DECISIONS.md §3). The comparison and the write both happen inside
+-- 'Db.reconcileAccountIfMatches', in one SQL transaction on one
+-- connection (AUDIT-05): reading 'clearedBalance' and writing
+-- 'Db.reconcileAccount' as two separate pool checkouts, as this used to
+-- do, left a gap where a concurrently-cleared row could slip in between
+-- them and get silently marked Reconciled without ever having been
+-- compared against the statement.
 reconcileAccountHandler :: Maybe Text -> Int64 -> ReconcileForm -> AppM (Html ())
 reconcileAccountHandler hx rawId form = case parseSignedEuros (statementBalance form) of
   Nothing -> withError hx "Invalid statement balance."
@@ -99,13 +141,10 @@ reconcileAccountHandler hx rawId form = case parseSignedEuros (statementBalance 
     if not (any ((== aid) . accId) accounts)
       then withError hx "Unknown account."
       else do
-        txs <- withConn (\conn -> Db.listTransactionsForAccount conn aid)
-        let cleared = clearedBalance aid txs
-        if cleared == stmt
-          then do
-            withConn (\conn -> Db.reconcileAccount conn aid)
-            renderFragment hx Nothing (Just "Account reconciled.")
-          else
+        result <- withConn (\conn -> Db.reconcileAccountIfMatches conn aid stmt)
+        case result of
+          Right () -> renderFragment hx Nothing (Just "Account reconciled.")
+          Left cleared ->
             withError
               hx
               ( "Doesn't match: your cleared transactions add up to "
@@ -134,7 +173,15 @@ accountsContent err successMsg accounts txs = div_ [id_ "accounts-content"] $ do
   errorBanner err
   successBanner successMsg
   newAccountForm
+  onboardingBanner accounts
   accountsTable accounts txs
+
+-- | Shown instead of a bare, empty table the very first time Bucktracker
+-- is opened (Track A Step 6) — a blank table with no accounts and no
+-- explanation reads as broken, not as "add your first one here".
+onboardingBanner :: [Account] -> Html ()
+onboardingBanner [] = p_ "No accounts yet — add your checking account, savings, or cash above to get started."
+onboardingBanner _  = mempty
 
 newAccountForm :: Html ()
 newAccountForm =
@@ -159,20 +206,45 @@ accountRow txs acc = tr_ $ do
   td_ (toHtml (accountTypeToText (accType acc)))
   td_ [class_ "amount"] (toHtml (centsToEuroText (accountBalance (accId acc) txs)))
   td_ (toHtml (statusText (isArchived acc)))
-  td_ (archiveButton acc)
-  td_ (reconcileForm txs acc)
+  td_ (archiveToggleButton acc)
+  td_ (reconcileCell txs acc)
   where
     statusText archived = if archived then "Archived" else "Active" :: Text
 
-archiveButton :: Account -> Html ()
-archiveButton acc
-  | isArchived acc = mempty
+-- | One button that flips between "Archive" and "Unarchive" depending
+-- on the account's current status (same toggle-label shape as
+-- 'Api.Transactions.clearButton') — DECISIONS.md §11's "real unarchive
+-- action", plus an @hx-confirm@ prompt before archiving (not before
+-- un-archiving, which is always harmless) so one misclick doesn't
+-- silently hide an account.
+archiveToggleButton :: Account -> Html ()
+archiveToggleButton acc
+  | isArchived acc =
+      let routePath = "/accounts/" <> accountIdText (accId acc) <> "/unarchive"
+      in form_ [method_ "post", action_ routePath] $
+           button_
+             [type_ "submit", hxPost_ routePath, hxTarget_ "#accounts-content", hxSwap_ "outerHTML"]
+             "Unarchive"
   | otherwise =
       let routePath = "/accounts/" <> accountIdText (accId acc) <> "/archive"
       in form_ [method_ "post", action_ routePath] $
            button_
-             [type_ "submit", hxPost_ routePath, hxTarget_ "#accounts-content", hxSwap_ "outerHTML"]
+             [ type_ "submit"
+             , hxPost_ routePath
+             , hxTarget_ "#accounts-content"
+             , hxSwap_ "outerHTML"
+             , hxConfirm_ "Archive this account?"
+             ]
              "Archive"
+
+-- | No reconcile control once an account is archived (DECISIONS.md
+-- §11) — reconciling only ever matters for an account still receiving
+-- new activity, and an archived account's balance is required to
+-- already be zero (see 'archiveAccountHandler').
+reconcileCell :: [Transaction] -> Account -> Html ()
+reconcileCell txs acc
+  | isArchived acc = mempty
+  | otherwise = reconcileForm txs acc
 
 -- | Compares against 'Domain.Budget.clearedBalance' server-side
 -- (reconcileAccountHandler) — now signed (an overdrawn checking

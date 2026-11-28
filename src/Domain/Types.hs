@@ -105,11 +105,18 @@ data YearMonth = YearMonth
   } deriving stock (Eq, Ord, Show)
 
 -- | Smart constructor: 'Left' ('InvalidMonth' m) if the month is outside
--- @[1,12]@.
+-- @[1,12]@, 'Left' ('InvalidYear' y) if the year is outside
+-- @[1900,2200]@ (AUDIT-01) — a @YearMonth@ can only ever be built
+-- through here or 'dayToYearMonth', so bounding the year here is enough
+-- to keep 'Domain.Budget.monthsThrough' (which iterates @nextYearMonth@
+-- from the earliest to the latest known month) from ever folding over
+-- billions of months, or looping forever on 'Int' wraparound at
+-- @maxBound@.
 mkYearMonth :: Int -> Int -> Either DomainError YearMonth
 mkYearMonth y m
-  | m >= 1 && m <= 12 = Right (YearMonth y m)
-  | otherwise = Left (InvalidMonth m)
+  | m < 1 || m > 12 = Left (InvalidMonth m)
+  | y < 1900 || y > 2200 = Left (InvalidYear y)
+  | otherwise = Right (YearMonth y m)
 
 dayToYearMonth :: Day -> YearMonth
 dayToYearMonth day =

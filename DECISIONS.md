@@ -443,11 +443,14 @@ later.
   the exact recurrence-rule representation (RFC 5545-style vs. a
   simpler fixed set of patterns), whether `ScheduledItem` needs its own
   soft-delete/pause state, and how far into the future `/forecast`
-  defaults to projecting.
+  defaults to projecting. *(Update 2026-11-27: see §13 and
+  `docs/phases/track-e-recurring-spec.md` for how recurring obligations
+  and subscriptions are modeled in natural categories with an
+  orthogonal `is_fixed_obligation` flag.)*
 
-## 11. Flagged for v0.1 completion (not yet fixed)
+## 11. Flagged for v0.1 completion — resolved in Phase 2 Track A Step 6 (2026-11-27)
 
-- **Archiving is a one-way trip.** `archiveAccount`/`archiveCategory`/
+- ~~**Archiving is a one-way trip.** `archiveAccount`/`archiveCategory`/
   `archiveCategoryGroup` only ever set `archived_at` — there's no
   "unarchive" function anywhere in `Db.*`, and no UI control for one.
   Combined with there being no confirmation step before archiving
@@ -455,17 +458,29 @@ later.
   specifically; it's equally true of `Api.Categories` and category
   groups, which M-7 doesn't mention), one accidental click on "Archive"
   is effectively permanent today — the only way back is a direct SQL
-  `UPDATE ... SET archived_at = NULL`.
-  - Flagged 2026-11-27 (product direction, found while reviewing the
-    Categories page): before calling v0.1 done, add (a) an
-    `hx-confirm` "Are you sure?" prompt on every archive button across
-    Accounts/Categories/category groups, and (b) a real unarchive
-    action — a new `Db.*` function clearing `archived_at`, plus the UI
-    control to trigger it — so a mistaken archive has an actual undo
-    path, not just a confirmation gate in front of the same one-way
-    door.
-  - Deliberately **not fixed in this pass** — logged so it isn't lost,
-    not yet acted on.
+  `UPDATE ... SET archived_at = NULL`.~~
+  - **Resolved (2026-11-27, Track A Step 6):**
+    1. Added idempotent `unarchiveAccount`, `unarchiveCategoryGroup`,
+       and `unarchiveCategory` (`SET archived_at = NULL WHERE id = ? AND
+       archived_at IS NOT NULL`) alongside idempotent `archive*` (`AND
+       archived_at IS NULL`), exposed via `Archive`/`Unarchive` toggle
+       buttons on `/accounts` and `/categories`.
+    2. Added `hx-confirm` prompts on every `Archive` button across
+       accounts, category groups, and categories.
+    3. Added precondition & server-side entity guards (closing the
+       remaining archive/cascade half of §8 H-5 as well): accounts with
+       non-zero `accountBalance`, categories with non-zero current
+       folded `available`, and category groups that still contain active
+       categories cannot be archived; new categories in archived groups
+       (`ArchivedCategoryGroup`), new budget assignments on archived
+       categories, and new transactions on archived accounts/categories
+       are rejected server-side; `Tracking` accounts are excluded from
+       the spending create picker; `Reconcile` is hidden on archived
+       accounts (and archiving an account requires every row on it to be
+       `Reconciled` first, `AUDIT-04`); category archiving checks all
+       folded months `>= today` so future assignments cannot be stranded
+       (`hasNonZeroBalanceFromNowOn`, `AUDIT-04`); and empty-state
+       onboarding prompts guide first-run setup.
 
 ## 12. Phase 2 decisions: Frontend & UX foundation, inline editing & bank import (2026-11-27)
 
@@ -553,3 +568,33 @@ zero-build-step, minimal-dependency, server-truthful architecture.
     upload first renders a pure preview table flagging duplicates and
     letting the user pick categories/transfers/inflows before committing
     selected rows atomically (`Cleared` by default).
+
+## 13. Planned Track E: Recurring obligations, subscriptions & sinking-fund auto-funding (2026-11-27)
+
+Captured ahead of implementation (full engineering spec deferred until
+Tracks B–D complete; see `docs/phases/track-e-recurring-spec.md`) so key
+domain boundaries are preserved across intermediate tracks:
+
+- **Decouple recurring schedule from category placement:** Every
+  `recurring_rule` (amount, cadence: `Monthly | Quarterly | Annual`,
+  expected day, target category) targets its **natural budget category**
+  (e.g. Netflix/Crunchyroll in *Entertainment*, Basic-Fit in *Sport*,
+  rent in *Housing*), never a catch-all *"Subscriptions"* or *"Fixed
+  Bills"* category. Recurring charges therefore compete directly with
+  one-off discretionary spending inside the same envelope.
+- **Orthogonal `is_fixed_obligation` flag (`Bool`):** Separates
+  non-negotiable baseline bills (rent/mortgage, health insurance,
+  utilities, internet, municipal/vehicle taxes) from cancellable
+  discretionary subscriptions without forcing separate category groups.
+- **Dedicated `/recurring` view & baseline summary:** Displays all
+  recurring items with derived monthly status (`Funded` / `Paid` / `Due`,
+  matched via category activity and imported transactions) and reports
+  the **monthly mandatory fixed-obligation baseline** (including `1/3`
+  quarterly and `1/12` annual integer-cent sinking-fund accruals)
+  separately from **discretionary recurring subscriptions**.
+- **One-click "Fund Recurring" action:** Atomically tops up each active
+  recurring rule's target category `Assignment` for the viewed month to
+  cover its scheduled monthly accrual (aggregating multiple rules that
+  share a category, idempotently) without manual row-by-row entry —
+  while keeping `transactions` strictly historical (no synthetic ledger
+  writes, consistent with §10).

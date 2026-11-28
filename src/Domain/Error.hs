@@ -15,6 +15,12 @@ data DomainError
     EmptyName Text
   | -- | 'Domain.Types.mkYearMonth' got a month number outside [1,12].
     InvalidMonth Int
+  | -- | 'Domain.Types.mkYearMonth' got a year outside [1900,2200]
+    -- (AUDIT-01): unbounded years let 'Domain.Budget.monthsThrough' fold
+    -- over billions of months (OOM) or, at @maxBound :: Int@, loop
+    -- forever on 'Int' wraparound — this closes both off at the smart
+    -- constructor, the one place every @YearMonth@ is built.
+    InvalidYear Int
   | -- | A transfer got the same account on both sides.
     TransferRequiresDistinctAccounts
   | -- | A transfer connected an on-budget account with a tracking
@@ -37,4 +43,32 @@ data DomainError
     -- that confirmation. Enforced by 'Db.Transaction.deleteTransaction'
     -- and the @update*@ family.
     CannotModifyReconciledTransaction
+  | -- | 'Db.Category.insertCategory' targeted a 'Domain.Category.CategoryGroup'
+    -- that's already archived (Track A Step 6, DECISIONS.md §11): an
+    -- archived group is meant to be a dead end for new children, not
+    -- just a label — otherwise a group archived to get it out of the
+    -- "add category" picker could still silently grow new categories
+    -- through this route.
+    ArchivedCategoryGroup
+  | -- | An @update*@ targeted a transaction whose stored
+    -- 'Domain.Transaction.Categorization' doesn't match the kind of
+    -- edit being attempted (AUDIT-03.2): e.g. posting to
+    -- @edit-inflow@ for an id that's actually a split or a transfer
+    -- leg. Without this check, 'Db.Transaction.withReplaceable' would
+    -- delete whatever that row actually was (both legs, for a
+    -- transfer!) and silently replace it with the wrong kind.
+    TransactionKindMismatch
+  | -- | A name (account, category, category group) contained a
+    -- control character after trimming (AUDIT-08).
+    InvalidCharacters Text
+  | -- | A name or payee exceeded its maximum length (AUDIT-08). The
+    -- 'Int' is that maximum.
+    NameTooLong Text Int
+  | -- | A transfer's amount was zero or negative. 'Api.Money.parsePositiveEuros'
+    -- already rejects this at the edge, but 'Domain.Transaction.mkTransferPair'
+    -- and 'Db.Transaction.insertTransfer'/'updateTransfer' enforce it
+    -- again as defense in depth (AUDIT-08) — the sign of a transfer is
+    -- decided entirely by which account is "from" and which is "to",
+    -- never by the amount itself.
+    TransferAmountMustBePositive
   deriving stock (Eq, Show)

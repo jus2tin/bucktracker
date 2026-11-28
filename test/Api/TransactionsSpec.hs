@@ -4,6 +4,8 @@ import Api.Setup (postHtmlFormHx, withTestApp)
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import Data.Char (toLower)
 import Data.List (isInfixOf)
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.Encoding as TLE
 import Data.Time (getCurrentTime, showGregorian, utctDay)
 import Network.Wai.Test (SResponse (simpleBody))
 import Test.Hspec
@@ -47,6 +49,22 @@ spec = with withTestApp $ do
       juneView <- get "/transactions?month=2026-06"
       liftIO (bodyContains "June Salary" juneView `shouldBe` True)
       liftIO (bodyContains "July Salary" juneView `shouldBe` False)
+
+  describe "out-of-range ?month= and transaction dates (AUDIT-01)" $ do
+    it "falls back to today's local month on an astronomically large ?month=, instead of hanging or OOMing" $ do
+      day <- liftIO today
+      let thisMonth = take 7 day -- "YYYY-MM-DD" -> "YYYY-MM"
+      response <- get "/transactions?month=99999999-01"
+      liftIO (bodyContains thisMonth response `shouldBe` True)
+
+    it "rejects a transaction date with a year outside [1900,2200], without adding a row" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", "99999999-01-01"), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      liftIO (bodyContains "Invalid date" response `shouldBe` True)
+      liftIO (bodyContains "Salary" response `shouldBe` False)
 
   describe "account filtering" $
     it "?account=<id> only shows that account's transactions, and the Accounts page links to it" $ do
@@ -145,6 +163,17 @@ spec = with withTestApp $ do
           "/transactions/inflow"
           [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "0.00")]
       liftIO (bodyContains "Invalid amount" response `shouldBe` True)
+
+    it "rejects a new inflow on an archived account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts/1/archive" []
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      liftIO (bodyContains "archived account" response `shouldBe` True)
+      liftIO (bodyContains "Salary" response `shouldBe` False)
 
   describe "POST /transactions/spending" $ do
     it "creates a categorized expense and shows it in the register, stored as negative" $ do
@@ -248,6 +277,34 @@ spec = with withTestApp $ do
       response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "999" "12.34")
       liftIO (bodyContains "Unknown category" response `shouldBe` True)
 
+    it "rejects a new expense on an archived account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts/1/archive" []
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      day <- liftIO today
+      response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "12.34")
+      liftIO (bodyContains "archived account" response `shouldBe` True)
+
+    it "rejects a split line against an archived category" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories/1/archive" []
+      day <- liftIO today
+      response <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "12.34")
+      liftIO (bodyContains "archived category" response `shouldBe` True)
+
+    it "the spending account picker excludes tracking accounts, unlike the inflow/transfer pickers" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Investments"), ("accountType", "tracking")]
+      response <- get "/transactions"
+      -- "Investments" is offered by the inflow picker and both transfer
+      -- pickers (3 selects) but deliberately not the spending one — a
+      -- 'Domain.Transaction.Categorized' transaction can never legally
+      -- land on a tracking account.
+      liftIO (countOccurrences "Investments" response `shouldBe` 3)
+
   describe "POST /transactions/transfer" $ do
     it "creates both legs of a transfer and shows them in the register" $ do
       _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
@@ -278,6 +335,17 @@ spec = with withTestApp $ do
           "/transactions/transfer"
           [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
       liftIO (bodyContains "tracking account" response `shouldBe` True)
+
+    it "rejects a new transfer touching an archived account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Savings"), ("accountType", "savings")]
+      _ <- postHtmlForm "/accounts/2/archive" []
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
+      liftIO (bodyContains "archived account" response `shouldBe` True)
 
   describe "POST /transactions/:id/clear" $
     it "toggles a transaction between Uncleared and Cleared (the first step of reconciling)" $ do
@@ -376,6 +444,130 @@ spec = with withTestApp $ do
       liftIO (bodyContains "Transfer: Cash" response `shouldBe` True)
       liftIO (bodyContains "75.00" response `shouldBe` True)
 
+  describe "editing onto a *different*, newly chosen archived account/category is rejected (AUDIT-03.3)" $ do
+    it "rejects edit-inflow moving the transaction onto a different archived account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Old Savings"), ("accountType", "savings")]
+      _ <- postHtmlForm "/accounts/2/archive" []
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-inflow"
+          [("inflowAccountId", "2"), ("inflowDate", day), ("inflowPayee", "Salary"), ("inflowAmount", "100.00")]
+      liftIO (bodyContains "archived account" response `shouldBe` True)
+      liftIO (bodyContains "Old Savings" response `shouldBe` False)
+
+    it "rejects edit-spending moving a line onto a different archived category" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Old Category"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories/2/archive" []
+      day <- liftIO today
+      _ <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "40.00")
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingDate", day)
+          , ("spendingPayee", "Corrected")
+          , ("lineCategoryId", "2")
+          , ("lineAmount", "40.00")
+          ]
+      liftIO (bodyContains "archived category" response `shouldBe` True)
+      liftIO (bodyContains "-40.00" response `shouldBe` True) -- the original is untouched
+
+    it "rejects edit-transfer moving a leg onto a different archived account" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Savings"), ("accountType", "savings")]
+      _ <- postHtmlForm "/accounts" [("name", "Old Cash"), ("accountType", "cash")]
+      _ <- postHtmlForm "/accounts/3/archive" []
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "3"), ("transferDate", day), ("transferAmount", "50.00")]
+      liftIO (bodyContains "archived account" response `shouldBe` True)
+      liftIO (bodyContains "Old Cash" response `shouldBe` False)
+
+  describe "cross-kind edits are rejected (AUDIT-03.2)" $
+    it "rejects edit-inflow for an id that's actually a split transaction, leaving it untouched" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      day <- liftIO today
+      _ <- postHtmlForm "/transactions/spending" (singleLineSpending day "1" "1" "40.00")
+      response <-
+        postHtmlForm
+          "/transactions/1/edit-inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Hijacked"), ("inflowAmount", "100.00")]
+      liftIO (bodyContains "kind of transaction" response `shouldBe` True)
+      liftIO (bodyContains "-40.00" response `shouldBe` True)
+      liftIO (bodyContains "Hijacked" response `shouldBe` False)
+
+  describe "mismatched split line fields are rejected (AUDIT-03.4)" $
+    it "rejects a spending POST with more lineCategoryId fields than lineAmount fields" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]
+      _ <- postHtmlForm "/categories" [("categoryName", "Household"), ("groupId", "1")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/spending"
+          [ ("spendingAccountId", "1")
+          , ("spendingDate", day)
+          , ("spendingPayee", "Supermarket")
+          , ("lineCategoryId", "1")
+          , ("lineCategoryId", "2")
+          , ("lineAmount", "40.00")
+          ]
+      liftIO (bodyContains "Mismatched category/amount fields" response `shouldBe` True)
+      liftIO (bodyContains "Supermarket" response `shouldBe` False)
+
+  describe "transfer reconciliation lock applies to both legs (AUDIT-02)" $
+    it "blocks editing/deleting the not-yet-reconciled leg once its sibling leg is Reconciled, and hides its Edit control" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      _ <- postHtmlForm "/accounts" [("name", "Savings"), ("accountType", "savings")]
+      day <- liftIO today
+      _ <-
+        postHtmlForm
+          "/transactions/transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "50.00")]
+      _ <- postHtmlForm "/transactions/1/clear" []
+      _ <- postHtmlForm "/accounts/1/reconcile" [("statementBalance", "-50.00")]
+
+      page <- get "/transactions"
+      liftIO (bodyContains "edit-details-2" page `shouldBe` False)
+
+      deleteResponse <- postHtmlForm "/transactions/2/delete" []
+      liftIO (bodyContains "Cannot delete a reconciled transaction" deleteResponse `shouldBe` True)
+      liftIO (bodyContains "Transfer: Checking" deleteResponse `shouldBe` True)
+
+      editResponse <-
+        postHtmlForm
+          "/transactions/2/edit-transfer"
+          [("transferFromAccountId", "1"), ("transferToAccountId", "2"), ("transferDate", day), ("transferAmount", "75.00")]
+      liftIO (bodyContains "Cannot edit a reconciled transaction" editResponse `shouldBe` True)
+
+  describe "payee validation (AUDIT-08)" $
+    it "rejects a payee containing a control character, without adding a row" $ do
+      _ <- postHtmlForm "/accounts" [("name", "Checking"), ("accountType", "checking")]
+      day <- liftIO today
+      response <-
+        postHtmlForm
+          "/transactions/inflow"
+          [("inflowAccountId", "1"), ("inflowDate", day), ("inflowPayee", "Salary\tBonus"), ("inflowAmount", "100.00")]
+      liftIO (bodyContains "Invalid payee" response `shouldBe` True)
+
 -- | A spending form post with a single split line.
 singleLineSpending :: String -> String -> String -> String -> [(String, String)]
 singleLineSpending day accountId categoryId amount =
@@ -393,3 +585,6 @@ bodyContains needle = (needle `isInfixOf`) . BSL8.unpack . simpleBody
 -- isn't a contract worth pinning a test to.
 bodyContainsCI :: String -> SResponse -> Bool
 bodyContainsCI needle = (map toLower needle `isInfixOf`) . map toLower . BSL8.unpack . simpleBody
+
+countOccurrences :: TL.Text -> SResponse -> Int
+countOccurrences needle = fromIntegral . TL.count needle . TLE.decodeUtf8 . simpleBody

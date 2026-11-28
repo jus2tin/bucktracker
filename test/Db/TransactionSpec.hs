@@ -14,6 +14,7 @@ import Db.Transaction
   , listTransactionsForAccount
   , listTransactionsInMonth
   , reconcileAccount
+  , reconcileAccountIfMatches
   , setTransactionCleared
   , updateInflow
   , updateSpending
@@ -25,18 +26,21 @@ import Domain.Error
   ( DomainError
       ( CannotModifyReconciledTransaction
       , CategorizedTransactionRequiresOnBudgetAccount
+      , TransactionKindMismatch
+      , TransferAmountMustBePositive
       , TransferRequiresDistinctAccounts
       , TransferRequiresMatchingBudgetStatus
       )
   )
 import Domain.Transaction
   ( Categorization (Categorized, Inflow)
-  , Transaction (txAccount, txCategorization, txId, txPayee, txStatus)
+  , Transaction (txAccount, txCategorization, txId, txImportHash, txPayee, txStatus)
   , TransactionLine (TransactionLine)
   , transactionAmount
   )
 import Domain.Types
   ( AccountType (Checking, Tracking)
+  , ImportHash (ImportHash)
   , TransactionStatus (Cleared, Reconciled, Uncleared)
   , cents
   , mkYearMonth
@@ -246,7 +250,7 @@ spec = around withTestDb $
       from <- insertAccount conn "Checking Account" Checking >>= expectRight
       to <- insertAccount conn "Savings Account" Checking >>= expectRight
       other <- insertAccount conn "Cash" Checking >>= expectRight
-      (legFrom, legTo) <-
+      (legFrom, _legTo) <-
         insertTransfer conn (accId from, accId to) (fromGregorian 2026 1 10) Uncleared (cents 10000)
           >>= expectRight
       result <- updateTransfer conn (txId legFrom) (accId from, accId other) (fromGregorian 2026 1 11) (cents 5000)
@@ -259,3 +263,135 @@ spec = around withTestDb $
         _ -> expectationFailure ("expected Right (Just _), got " <> show result)
       -- the original "to" account (Savings) keeps no trace of the old leg
       listTransactionsForAccount conn (accId to) >>= (`shouldBe` [])
+
+    it "deleteTransaction/updateTransfer are blocked when the *other* leg is Reconciled, even though this leg isn't (AUDIT-02)" $ \conn -> do
+      from <- insertAccount conn "Checking Account" Checking >>= expectRight
+      to <- insertAccount conn "Savings Account" Checking >>= expectRight
+      (legFrom, legTo) <-
+        insertTransfer conn (accId from, accId to) (fromGregorian 2026 1 10) Uncleared (cents 10000)
+          >>= expectRight
+      -- only the "from" leg's account gets reconciled
+      setTransactionCleared conn (txId legFrom)
+      reconcileAccount conn (accId from)
+
+      deleteResult <- deleteTransaction conn (txId legTo)
+      deleteResult `shouldBe` Left CannotModifyReconciledTransaction
+      getTransaction conn (txId legFrom) >>= (`shouldBe` Just legFrom {txStatus = Reconciled})
+      getTransaction conn (txId legTo) >>= (`shouldBe` Just legTo)
+
+      updateResult <- updateTransfer conn (txId legTo) (accId from, accId to) (fromGregorian 2026 1 11) (cents 5000)
+      updateResult `shouldBe` Left CannotModifyReconciledTransaction
+      getTransaction conn (txId legFrom) >>= (`shouldBe` Just legFrom {txStatus = Reconciled})
+      getTransaction conn (txId legTo) >>= (`shouldBe` Just legTo)
+
+    it "updateTransfer preserves each leg's own independent status instead of clobbering one with the other's (AUDIT-02)" $ \conn -> do
+      from <- insertAccount conn "Checking Account" Checking >>= expectRight
+      to <- insertAccount conn "Savings Account" Checking >>= expectRight
+      (legFrom, _legTo) <-
+        insertTransfer conn (accId from, accId to) (fromGregorian 2026 1 10) Uncleared (cents 10000)
+          >>= expectRight
+      setTransactionCleared conn (txId legFrom) -- "from" leg becomes Cleared; "to" leg stays Uncleared
+
+      result <- updateTransfer conn (txId legFrom) (accId from, accId to) (fromGregorian 2026 1 15) (cents 7500)
+      case result of
+        Right (Just (editedFrom, editedTo)) -> do
+          txStatus editedFrom `shouldBe` Cleared
+          txStatus editedTo `shouldBe` Uncleared
+        _ -> expectationFailure ("expected Right (Just _), got " <> show result)
+
+    it "updateInflow preserves txImportHash on a same-account edit, and drops it on a different-account one (AUDIT-03.1)" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      otherAcc <- insertAccount conn "Savings Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 100) (Just (ImportHash "bank-row-1"))
+
+      sameAccountResult <- updateInflow conn (txId tx) (accId acc) (fromGregorian 2026 1 2) "Corrected" (cents 150)
+      case sameAccountResult of
+        Right (Just edited) -> txImportHash edited `shouldBe` Just (ImportHash "bank-row-1")
+        _ -> expectationFailure ("expected Right (Just _), got " <> show sameAccountResult)
+
+      tx2 <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 100) (Just (ImportHash "bank-row-2"))
+      movedAccountResult <- updateInflow conn (txId tx2) (accId otherAcc) (fromGregorian 2026 1 1) "Salary" (cents 100)
+      case movedAccountResult of
+        Right (Just edited) -> txImportHash edited `shouldBe` Nothing
+        _ -> expectationFailure ("expected Right (Just _), got " <> show movedAccountResult)
+
+    it "updateSpending preserves txImportHash on a same-account edit (AUDIT-03.1)" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      group <- insertCategoryGroup conn "Groceries" >>= expectRight
+      cat <- insertCategory conn (cgId group) "Supermarket" >>= expectRight
+      let lines' = TransactionLine (catId cat) (cents (-3000)) :| []
+      tx <-
+        insertSpending conn (accId acc) (fromGregorian 2026 1 5) "Supermarket" Uncleared lines' (Just (ImportHash "bank-row-3"))
+          >>= expectRight
+      result <- updateSpending conn (txId tx) (accId acc) (fromGregorian 2026 1 6) "Corrected" lines'
+      case result of
+        Right (Just edited) -> txImportHash edited `shouldBe` Just (ImportHash "bank-row-3")
+        _ -> expectationFailure ("expected Right (Just _), got " <> show result)
+
+    it "updateInflow rejects a target id that's actually a different kind of transaction, without changing it (AUDIT-03.2)" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      group <- insertCategoryGroup conn "Groceries" >>= expectRight
+      cat <- insertCategory conn (cgId group) "Supermarket" >>= expectRight
+      let lines' = TransactionLine (catId cat) (cents (-3000)) :| []
+      tx <- insertSpending conn (accId acc) (fromGregorian 2026 1 5) "Supermarket" Uncleared lines' Nothing >>= expectRight
+      result <- updateInflow conn (txId tx) (accId acc) (fromGregorian 2026 1 5) "Hijacked" (cents 100)
+      result `shouldBe` Left TransactionKindMismatch
+      afterAttempt <- getTransaction conn (txId tx)
+      fmap txCategorization afterAttempt `shouldBe` Just (Categorized lines')
+
+    it "updateSpending rejects a target id that's actually an inflow, without changing it (AUDIT-03.2)" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      group <- insertCategoryGroup conn "Groceries" >>= expectRight
+      cat <- insertCategory conn (cgId group) "Supermarket" >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 100) Nothing
+      let lines' = TransactionLine (catId cat) (cents (-3000)) :| []
+      result <- updateSpending conn (txId tx) (accId acc) (fromGregorian 2026 1 5) "Hijacked" lines'
+      result `shouldBe` Left TransactionKindMismatch
+      afterAttempt <- getTransaction conn (txId tx)
+      fmap txCategorization afterAttempt `shouldBe` Just (Inflow (cents 100))
+
+    it "updateTransfer rejects a target id that's actually a plain inflow, without changing it (AUDIT-03.2)" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      otherAcc <- insertAccount conn "Savings Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 100) Nothing
+      result <- updateTransfer conn (txId tx) (accId acc, accId otherAcc) (fromGregorian 2026 1 1) (cents 100)
+      result `shouldBe` Left TransactionKindMismatch
+      afterAttempt <- getTransaction conn (txId tx)
+      fmap txCategorization afterAttempt `shouldBe` Just (Inflow (cents 100))
+
+    it "insertTransfer rejects a zero or negative amount, without adding rows (AUDIT-08)" $ \conn -> do
+      from <- insertAccount conn "Checking Account" Checking >>= expectRight
+      to <- insertAccount conn "Savings Account" Checking >>= expectRight
+      zeroResult <- insertTransfer conn (accId from, accId to) (fromGregorian 2026 1 10) Uncleared zeroCents
+      zeroResult `shouldBe` Left TransferAmountMustBePositive
+      negativeResult <- insertTransfer conn (accId from, accId to) (fromGregorian 2026 1 10) Uncleared (cents (-500))
+      negativeResult `shouldBe` Left TransferAmountMustBePositive
+      listTransactionsForAccount conn (accId from) >>= (`shouldBe` [])
+
+    it "updateTransfer rejects a zero or negative amount, without changing the original (AUDIT-08)" $ \conn -> do
+      from <- insertAccount conn "Checking Account" Checking >>= expectRight
+      to <- insertAccount conn "Savings Account" Checking >>= expectRight
+      (legFrom, _legTo) <-
+        insertTransfer conn (accId from, accId to) (fromGregorian 2026 1 10) Uncleared (cents 10000)
+          >>= expectRight
+      result <- updateTransfer conn (txId legFrom) (accId from, accId to) (fromGregorian 2026 1 11) zeroCents
+      result `shouldBe` Left TransferAmountMustBePositive
+      getTransaction conn (txId legFrom) >>= (`shouldBe` Just legFrom)
+
+    it "reconcileAccountIfMatches reconciles atomically when the cleared balance matches (AUDIT-05)" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 10000) Nothing
+      setTransactionCleared conn (txId tx)
+      result <- reconcileAccountIfMatches conn (accId acc) (cents 10000)
+      result `shouldBe` Right ()
+      afterAttempt <- getTransaction conn (txId tx)
+      fmap txStatus afterAttempt `shouldBe` Just Reconciled
+
+    it "reconcileAccountIfMatches changes nothing and reports the actual balance on a mismatch (AUDIT-05)" $ \conn -> do
+      acc <- insertAccount conn "Checking Account" Checking >>= expectRight
+      tx <- insertInflow conn (accId acc) (fromGregorian 2026 1 1) "Salary" Uncleared (cents 10000) Nothing
+      setTransactionCleared conn (txId tx)
+      result <- reconcileAccountIfMatches conn (accId acc) (cents 9999)
+      result `shouldBe` Left (cents 10000)
+      afterAttempt <- getTransaction conn (txId tx)
+      fmap txStatus afterAttempt `shouldBe` Just Cleared

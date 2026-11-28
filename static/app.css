@@ -1,0 +1,20 @@
+/* Bucktracker's own static CSS (AUDIT-07): only what Pico CSS doesn't
+   already style for us. Lives in /static (not an inline <style> in
+   Api.Html.page) so a strict `style-src 'self'` CSP can allow it. */
+.error { color: #a00; }
+.success { color: #070; }
+.amount { text-align: right; }
+
+/* HTMX's own boot-time indicator styles, normally injected as an
+   inline <style> (includeIndicatorStyles: true) — also blocked by a
+   strict style-src; disabled via <meta name="htmx-config"> in
+   Api.Html.page, and replaced here. */
+.htmx-indicator { opacity: 0; }
+.htmx-request .htmx-indicator, .htmx-request.htmx-indicator {
+  opacity: 1;
+  transition: opacity 200ms ease-in;
+}
+
+/* For any future x-cloak use: hides an Alpine-bound element until
+   Alpine has initialized it, instead of flashing its pre-init state. */
+[x-cloak] { display: none !important; }

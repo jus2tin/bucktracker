@@ -7,10 +7,10 @@ cabal-version: 1.12
 name:           bucktracker
 version:        0.1.0.0
 synopsis:       Personal zero-based / envelope budget and money tracker
-description:    Please see the README on GitHub at <https://github.com/justintermaat/bucktracker#readme>
+description:    Please see the README on GitHub at <https://github.com/jus2tin/bucktracker#readme>
 category:       Finance
-homepage:       https://github.com/justintermaat/bucktracker#readme
-bug-reports:    https://github.com/justintermaat/bucktracker/issues
+homepage:       https://github.com/jus2tin/bucktracker#readme
+bug-reports:    https://github.com/jus2tin/bucktracker/issues
 author:         Justin Termaat
 maintainer:     justintermaat@gmail.com
 copyright:      2026 Justin Termaat
@@ -22,6 +22,7 @@ extra-source-files:
     CHANGELOG.md
 data-files:
     migrations/0001_initial.sql
+    static/app.css
     static/pico.min.css
     static/alpine-csp.min.js
     static/app.js
@@ -29,7 +30,7 @@ data-files:
 
 source-repository head
   type: git
-  location: https://github.com/justintermaat/bucktracker
+  location: https://github.com/jus2tin/bucktracker
 
 library
   exposed-modules:
@@ -148,6 +149,7 @@ test-suite bucktracker-test
       Domain.Gen
       Domain.TransactionSpec
       Domain.TypesSpec
+      Domain.ValidationSpec
       Paths_bucktracker
   hs-source-dirs:
       test

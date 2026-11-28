@@ -163,17 +163,18 @@ genDistinctPair accs = do
 
 -- | Both legs of a transfer, always between two *different* on-budget
 -- accounts (see DECISIONS.md §3 for why a mixed on-budget/tracking
--- transfer is deliberately not generated here).
+-- transfer is deliberately not generated here) and a strictly positive
+-- amount (AUDIT-08: 'mkTransferPair' rejects zero/negative amounts).
 genTransferTxs :: YearMonth -> [Account] -> Gen [Transaction]
 genTransferTxs month onBudgetAccs = do
   (fromAcc, toAcc) <- genDistinctPair onBudgetAccs
   day <- genDayIn month
   status <- arbitrary
-  amt <- genCents
+  amt <- cents <$> choose (1, 100000000)
   case mkTransferPair (TransferId 0) (TransactionId 0, accId fromAcc) (TransactionId 0, accId toAcc)
          day status amt of
     Right (legA, legB) -> pure [legA, legB]
-    Left _             -> pure [] -- unreachable: fromAcc /= toAcc is guaranteed
+    Left _             -> pure [] -- unreachable: fromAcc /= toAcc and amt > 0 are both guaranteed
 
 genAssignmentFor :: YearMonth -> Category -> Gen Assignment
 genAssignmentFor month cat = Assignment (catId cat) month <$> genCents

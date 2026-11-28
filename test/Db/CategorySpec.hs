@@ -8,6 +8,8 @@ import Db.Category
   , listCategories
   , listCategoriesInGroup
   , listCategoryGroups
+  , unarchiveCategory
+  , unarchiveCategoryGroup
   )
 import Db.Setup (expectRight, withTestDb)
 import Domain.Category
@@ -16,7 +18,7 @@ import Domain.Category
   , isArchivedCategory
   , isArchivedGroup
   )
-import Domain.Error (DomainError (EmptyName))
+import Domain.Error (DomainError (ArchivedCategoryGroup, EmptyName))
 import Test.Hspec
 
 spec :: Spec
@@ -55,3 +57,25 @@ spec = around withTestDb $
       catsAfter <- listCategories conn
       map isArchivedGroup groupsAfter `shouldBe` [True]
       map isArchivedCategory catsAfter `shouldBe` [True]
+
+    it "unarchiveCategoryGroup/unarchiveCategory clear archived_at" $ \conn -> do
+      group <- insertCategoryGroup conn "Old Group" >>= expectRight
+      cat <- insertCategory conn (cgId group) "Old Category" >>= expectRight
+      archiveCategoryGroup conn (cgId group)
+      archiveCategory conn (catId cat)
+
+      unarchiveCategoryGroup conn (cgId group)
+      unarchiveCategory conn (catId cat)
+
+      groupsAfter <- listCategoryGroups conn
+      catsAfter <- listCategories conn
+      map isArchivedGroup groupsAfter `shouldBe` [False]
+      map isArchivedCategory catsAfter `shouldBe` [False]
+
+    it "rejects a new category in an already-archived group" $ \conn -> do
+      group <- insertCategoryGroup conn "Old Group" >>= expectRight
+      archiveCategoryGroup conn (cgId group)
+      result <- insertCategory conn (cgId group) "Rent"
+      result `shouldBe` Left ArchivedCategoryGroup
+      inGroup <- listCategoriesInGroup conn (cgId group)
+      inGroup `shouldBe` []
