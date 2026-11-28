@@ -47,8 +47,9 @@ This firewall eliminates duplicate token spend, prevents merge/working-tree coll
 2. **Adversarial Post-Commit Audits (`docs/reviews/*`):**
    - Audit Claude's commits and working-tree checkpoints strictly read-only (hunting for invariant bypasses, `Int64` boundary traps, SQLite WAL / TOCTOU races, CSP/XSS/CSRF vectors, and test blind spots).
    - Output concise, self-contained `AUDIT-NN` tickets with exact `file:line` locations, failure mechanics, and checkbox acceptance criteria.
-3. **Post-Step Documentation & Handoff Sync (`ARCHITECTURE.md`, `DECISIONS.md`, `CHANGELOG.md`, `docs/handoffs/*`):**
+3. **Post-Step Documentation, Handoff Sync & Git Release Gate (`ARCHITECTURE.md`, `DECISIONS.md`, `CHANGELOG.md`, `docs/handoffs/*`):**
    - After Claude completes a step or track, update `ARCHITECTURE.md` (including *"Where do I change X?"*), `DECISIONS.md`, `CHANGELOG.md`, and `docs/handoffs/YYYY-MM-DD-*.md` so documentation never drifts while Claude spends zero tokens writing Markdown prose.
+   - Upon Product Owner sign-off, Carbon owns merging completed feature/track branches cleanly into `main` (`git merge --no-ff` with descriptive milestone commit messages), deleting merged step branches, and pushing to `origin`.
 4. **CI & Operational Readiness (`.github/workflows/*`, `docs/RUNBOOK.md`):**
    - Maintain reproducible CI pipelines and keep operator backup/restore/integrity procedures current with runtime behavior.
 5. **Non-Interference Discipline:**
