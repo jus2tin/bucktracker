@@ -20,6 +20,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
 import GHC.Generics (Generic)
 import Lucid
+import Lucid.Base (makeAttribute)
 import Servant
 import Servant.HTML.Lucid (HTML)
 
@@ -220,6 +221,20 @@ categoryMonthRow ym categories cm = tr_ $ do
 -- works. The hidden @assignMonth@ field is what lets 'assignHandler'
 -- assign into whichever month is currently being viewed, not always
 -- the current one.
+--
+-- @x-data@ takes no arguments (AUDIT-06.1): the displayed value is
+-- passed via @data-initial-value@ instead, read by the component's own
+-- @init()@ (matching 'Api.Accounts.reconcileForm'\/@reconcileCalc@) —
+-- never interpolate a dynamic string into an @x-*@ attribute. Only
+-- 'Api.Money.centsToEuroText' ever reaches @displayText@ here, so
+-- nothing in it actually needed escaping yet, but the *pattern* of
+-- building an @x-data@ expression by string-pasting server data is
+-- itself the bug: the Alpine CSP build parses whatever ends up inside
+-- @x-data="..."@ as its own tiny expression language, and the browser
+-- HTML-decodes attribute values (@\&#39;@ -\> @'@) before that parser
+-- ever runs — so the very first field here that *can* contain a quote
+-- (a payee, an account/category name) would have broken out of the
+-- @'...'@ argument straight into that parser.
 assignedCell :: YearMonth -> CategoryMonth -> Html ()
 assignedCell ym cm =
   form_
@@ -228,7 +243,8 @@ assignedCell ym cm =
     , hxPost_ "/budget/assign"
     , hxTarget_ "#budget-content"
     , hxSwap_ "outerHTML"
-    , xData_ ("inlineAssign('" <> displayText <> "')")
+    , xData_ "inlineAssign()"
+    , dataInitialValue_ displayText
     , xRef_ "form"
     ]
     $ do
@@ -247,6 +263,10 @@ assignedCell ym cm =
         ]
   where
     displayText = centsToEuroText (cmAssigned cm)
+
+-- | @data-initial-value@ — see the AUDIT-06.1 note on 'assignedCell'.
+dataInitialValue_ :: Text -> Attribute
+dataInitialValue_ = makeAttribute "data-initial-value"
 
 categoryNameFor :: [Category] -> CategoryId -> Text
 categoryNameFor categories cid = case filter ((== cid) . catId) categories of

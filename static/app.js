@@ -48,15 +48,23 @@ function formatEuroCents(cents) {
 
 document.addEventListener('alpine:init', () => {
   // Backs the inline click-to-edit "Assigned" cell on /budget
-  // (Api.Budget.assignedCell). `initialDisplay` is the euro string
-  // already rendered server-side (e.g. "50.00") — this component only
+  // (Api.Budget.assignedCell). Takes no arguments (AUDIT-06.1: never
+  // interpolate a dynamic string into an x-data="..." expression) —
+  // `init()` instead reads the euro string already rendered
+  // server-side off the element's own data-initial-value attribute
+  // (e.g. "50.00", matching reconcileCalc below). This component only
   // toggles between showing that text and showing an editable input
   // pre-filled with it; Haskell/Api.Money still owns parsing and
   // validating whatever the user actually submits.
-  Alpine.data('inlineAssign', (initialDisplay) => ({
+  Alpine.data('inlineAssign', () => ({
     editing: false,
-    value: initialDisplay,
-    displayValue: initialDisplay,
+    value: '',
+    displayValue: '',
+
+    init() {
+      this.value = this.$el.dataset.initialValue;
+      this.displayValue = this.$el.dataset.initialValue;
+    },
 
     get notEditing() {
       return !this.editing;
@@ -106,7 +114,18 @@ document.addEventListener('alpine:init', () => {
       const lines = this.$refs.lines;
       const clone = lines.lastElementChild.cloneNode(true);
       const amountInput = clone.querySelector('input[name="lineAmount"]');
-      if (amountInput) amountInput.value = '';
+      if (amountInput) {
+        amountInput.value = '';
+        amountInput.removeAttribute('value');
+      }
+      // AUDIT-06.2: a new line must never silently inherit the row it
+      // was cloned from having a since-archived category selected —
+      // strip that option (Api.Transactions.categoryOption marks it
+      // with data-archived-extra) and fall back to the select's first
+      // (always-active) option instead.
+      clone.querySelectorAll('option[data-archived-extra]').forEach((option) => option.remove());
+      const categorySelect = clone.querySelector('select[name="lineCategoryId"]');
+      if (categorySelect) categorySelect.selectedIndex = 0;
       lines.appendChild(clone);
       this.recalc();
     },

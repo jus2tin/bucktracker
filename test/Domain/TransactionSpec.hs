@@ -13,12 +13,19 @@ spec = do
   describe "mkTransferPair (invariant 2: a transfer sums to 0)" $ do
     it "rejects a transfer to the same account" $
       property $ \acc day status amount ->
-        mkTransferPair (TransferId 1) (TransactionId 1, acc) (TransactionId 2, acc) day status amount
-          === Left TransferRequiresDistinctAccounts
+        amount > zeroCents ==>
+          mkTransferPair (TransferId 1) (TransactionId 1, acc) (TransactionId 2, acc) day status amount
+            === Left TransferRequiresDistinctAccounts
+
+    it "rejects a zero or negative amount, even between two different accounts (AUDIT-08)" $
+      property $ \fromAcc toAcc day status amount ->
+        fromAcc /= toAcc && amount <= zeroCents ==>
+          mkTransferPair (TransferId 1) (TransactionId 1, fromAcc) (TransactionId 2, toAcc) day status amount
+            === Left TransferAmountMustBePositive
 
     it "the two legs always sum to zeroCents" $
       property $ \fromAcc toAcc day status amount ->
-        fromAcc /= toAcc ==>
+        fromAcc /= toAcc && amount > zeroCents ==>
           case mkTransferPair (TransferId 1) (TransactionId 1, fromAcc) (TransactionId 2, toAcc)
                  day status amount of
             Right (legFrom, legTo) ->
@@ -27,7 +34,7 @@ spec = do
 
     it "the losing side is exactly the negation of the transferred amount" $
       property $ \fromAcc toAcc day status amount ->
-        fromAcc /= toAcc ==>
+        fromAcc /= toAcc && amount > zeroCents ==>
           case mkTransferPair (TransferId 1) (TransactionId 1, fromAcc) (TransactionId 2, toAcc)
                  day status amount of
             Right (legFrom, legTo) ->

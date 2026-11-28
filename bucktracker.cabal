@@ -22,6 +22,7 @@ extra-source-files:
     CHANGELOG.md
 data-files:
     migrations/0001_initial.sql
+    static/app.css
     static/pico.min.css
     static/alpine-csp.min.js
     static/app.js
@@ -148,6 +149,7 @@ test-suite bucktracker-test
       Domain.Gen
       Domain.TransactionSpec
       Domain.TypesSpec
+      Domain.ValidationSpec
       Paths_bucktracker
   hs-source-dirs:
       test

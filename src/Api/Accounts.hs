@@ -121,11 +121,17 @@ unarchiveAccountHandler hx rawId = do
 -- 'Domain.Budget.clearedBalance' (everything the register has marked
 -- Cleared/Reconciled on this account, via the per-row "Clear" toggle on
 -- the Transactions page) against the balance the user read off their
--- bank statement. On a match, 'Db.Transaction.reconcileAccount' locks
--- in every Cleared transaction as Reconciled; on a mismatch, nothing is
--- written — the user gets the two numbers back to go find the
--- discrepancy themselves (reconciliation is a pure comparison, not a
--- type of its own, see DECISIONS.md §3).
+-- bank statement. On a match, the write locks in every Cleared
+-- transaction as Reconciled; on a mismatch, nothing is written — the
+-- user gets the two numbers back to go find the discrepancy themselves
+-- (reconciliation is a pure comparison, not a type of its own, see
+-- DECISIONS.md §3). The comparison and the write both happen inside
+-- 'Db.reconcileAccountIfMatches', in one SQL transaction on one
+-- connection (AUDIT-05): reading 'clearedBalance' and writing
+-- 'Db.reconcileAccount' as two separate pool checkouts, as this used to
+-- do, left a gap where a concurrently-cleared row could slip in between
+-- them and get silently marked Reconciled without ever having been
+-- compared against the statement.
 reconcileAccountHandler :: Maybe Text -> Int64 -> ReconcileForm -> AppM (Html ())
 reconcileAccountHandler hx rawId form = case parseSignedEuros (statementBalance form) of
   Nothing -> withError hx "Invalid statement balance."
@@ -135,13 +141,10 @@ reconcileAccountHandler hx rawId form = case parseSignedEuros (statementBalance 
     if not (any ((== aid) . accId) accounts)
       then withError hx "Unknown account."
       else do
-        txs <- withConn (\conn -> Db.listTransactionsForAccount conn aid)
-        let cleared = clearedBalance aid txs
-        if cleared == stmt
-          then do
-            withConn (\conn -> Db.reconcileAccount conn aid)
-            renderFragment hx Nothing (Just "Account reconciled.")
-          else
+        result <- withConn (\conn -> Db.reconcileAccountIfMatches conn aid stmt)
+        case result of
+          Right () -> renderFragment hx Nothing (Just "Account reconciled.")
+          Left cleared ->
             withError
               hx
               ( "Doesn't match: your cleared transactions add up to "

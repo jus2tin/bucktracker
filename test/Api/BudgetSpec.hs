@@ -112,6 +112,11 @@ spec = with withTestApp $ do
       liftIO (bodyContains "/budget?month=2026-05" response `shouldBe` True)
       liftIO (bodyContains "/budget?month=2026-07" response `shouldBe` True)
 
+    it "falls back to today's local month on an out-of-range ?month=, instead of hanging or OOMing (AUDIT-01)" $ do
+      month <- liftIO thisMonth
+      response <- get "/budget?month=99999999-01"
+      liftIO (bodyContains month response `shouldBe` True)
+
     it "rolls over a category's carried-in balance into a later viewed month" $ do
       _ <- postHtmlForm "/category-groups" [("name", "Everyday Expenses")]
       _ <- postHtmlForm "/categories" [("categoryName", "Groceries"), ("groupId", "1")]

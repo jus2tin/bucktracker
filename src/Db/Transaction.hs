@@ -8,6 +8,7 @@ module Db.Transaction
   , listAllTransactions
   , setTransactionCleared
   , reconcileAccount
+  , reconcileAccountIfMatches
   , deleteTransaction
   , updateInflow
   , updateSpending
@@ -16,6 +17,7 @@ module Db.Transaction
 
 import Control.Exception (Exception, throwIO)
 import Control.Monad (forM_)
+import Data.List (find)
 import Data.List.NonEmpty (NonEmpty (..), toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -34,6 +36,7 @@ import Database.SQLite.Simple
 import Db.Account (getAccount)
 import Db.Field ()
 import Domain.Account (Account, isOnBudget, sameBudgetStatus)
+import Domain.Budget (clearedBalance)
 import Domain.Error (DomainError (..))
 import Domain.Transaction
   ( Categorization (Categorized, Inflow, TransferLeg)
@@ -47,7 +50,7 @@ import Domain.Types
   , Cents
   , ImportHash
   , TransactionId (TransactionId)
-  , TransactionStatus (Cleared, Reconciled)
+  , TransactionStatus (Cleared, Reconciled, Uncleared)
   , TransferId (TransferId)
   , YearMonth
   , negateCents
@@ -55,6 +58,7 @@ import Domain.Types
   , toggleCleared
   , ymMonth
   , ymYear
+  , zeroCents
   )
 
 -- $editing
@@ -221,9 +225,13 @@ insertSpendingRows conn accId day payee status lines' importHash = do
 
 -- | The two legs of a transfer. Validates, in this order: (1) the two
 -- accounts must differ (same check as Phase 1's pure
--- @mkTransferPair@); (2) they must have the same budget status
--- ('sameBudgetStatus') — the rule newly enforced in Phase 2 from
--- DECISIONS.md §3/§7. Both legs are inserted in one transaction.
+-- @mkTransferPair@); (2) the amount must be strictly positive
+-- (AUDIT-08, defense in depth beneath 'Api.Money.parsePositiveEuros');
+-- (3) they must have the same budget status ('sameBudgetStatus') — the
+-- rule newly enforced in Phase 2 from DECISIONS.md §3/§7. Both legs are
+-- inserted in one transaction, both starting at @status@ (a freshly
+-- created transfer has no prior, independent leg statuses to preserve
+-- — contrast 'updateTransfer').
 insertTransfer
   :: Connection
   -> (AccountId, AccountId) -- ^ (from, to)
@@ -233,21 +241,31 @@ insertTransfer
   -> IO (Either DomainError (Transaction, Transaction))
 insertTransfer conn (fromAccId, toAccId) day status amount
   | fromAccId == toAccId = pure (Left TransferRequiresDistinctAccounts)
+  | amount <= zeroCents = pure (Left TransferAmountMustBePositive)
   | otherwise = do
       fromAcc <- requireAccount conn fromAccId
       toAcc <- requireAccount conn toAccId
       if not (sameBudgetStatus fromAcc toAcc)
         then pure (Left TransferRequiresMatchingBudgetStatus)
-        else Right <$> withTransaction conn (insertTransferRows conn (fromAccId, toAccId) day status amount)
+        else Right <$> withTransaction conn (insertTransferRows conn (fromAccId, toAccId) day (status, status) amount)
 
 -- | No validation of its own — the raw helper behind both
 -- 'insertTransfer' and 'updateTransfer' (see "$editing"). Must already
 -- be running inside a 'withTransaction': the two legs and the shared
 -- @transfers@ row are three statements that should never be left
--- half-done.
+-- half-done. Takes the "from" and "to" legs' statuses *separately*
+-- (AUDIT-02): a fresh 'insertTransfer' passes the same status for both,
+-- but 'updateTransfer' must be able to preserve each existing leg's own
+-- independent status instead of clobbering one with the other's.
 insertTransferRows
-  :: Connection -> (AccountId, AccountId) -> Day -> TransactionStatus -> Cents -> IO (Transaction, Transaction)
-insertTransferRows conn (fromAccId, toAccId) day status amount = insertBothLegs conn fromAccId toAccId day status amount
+  :: Connection
+  -> (AccountId, AccountId)
+  -> Day
+  -> (TransactionStatus, TransactionStatus)
+  -> Cents
+  -> IO (Transaction, Transaction)
+insertTransferRows conn (fromAccId, toAccId) day (fromStatus, toStatus) amount =
+  insertBothLegs conn fromAccId toAccId day fromStatus toStatus amount
 
 newtype UnknownAccount = UnknownAccount AccountId deriving stock (Show)
 instance Exception UnknownAccount
@@ -258,14 +276,21 @@ requireAccount conn aid = do
   maybe (throwIO (UnknownAccount aid)) pure maybeAcc
 
 insertBothLegs
-  :: Connection -> AccountId -> AccountId -> Day -> TransactionStatus -> Cents -> IO (Transaction, Transaction)
-insertBothLegs conn fromAccId toAccId day status amount = do
+  :: Connection
+  -> AccountId
+  -> AccountId
+  -> Day
+  -> TransactionStatus
+  -> TransactionStatus
+  -> Cents
+  -> IO (Transaction, Transaction)
+insertBothLegs conn fromAccId toAccId day fromStatus toStatus amount = do
   transferId <- allocateTransferId conn
-  fromTxId <- insertTransferLeg conn transferId fromAccId day status (negateCents amount) toAccId
-  toTxId <- insertTransferLeg conn transferId toAccId day status amount fromAccId
+  fromTxId <- insertTransferLeg conn transferId fromAccId day fromStatus (negateCents amount) toAccId
+  toTxId <- insertTransferLeg conn transferId toAccId day toStatus amount fromAccId
   pure
-    ( Transaction fromTxId fromAccId day "Transfer" status (TransferLeg transferId toAccId (negateCents amount)) Nothing
-    , Transaction toTxId toAccId day "Transfer" status (TransferLeg transferId fromAccId amount) Nothing
+    ( Transaction fromTxId fromAccId day "Transfer" fromStatus (TransferLeg transferId toAccId (negateCents amount)) Nothing
+    , Transaction toTxId toAccId day "Transfer" toStatus (TransferLeg transferId fromAccId amount) Nothing
     )
 
 allocateTransferId :: Connection -> IO TransferId
@@ -370,16 +395,44 @@ reconcileAccount conn aid =
     "UPDATE transactions SET status = ? WHERE account_id = ? AND status = ?"
     (Reconciled, aid, Cleared)
 
+-- | Reconciliation's "commit" step, made atomic (AUDIT-05): computes
+-- 'Domain.Budget.clearedBalance' and compares it against
+-- @statementBalance@, and only on a match runs the write — both inside
+-- one SQL transaction, on one connection, so no concurrently-cleared
+-- row can slip in between the read and the write the way it could when
+-- the read ('Domain.Budget.clearedBalance' over a separately-fetched
+-- transaction list) and the write ('reconcileAccount') were two
+-- separate pool checkouts, as in the original
+-- 'Api.Accounts.reconcileAccountHandler'. 'Left' carries the actual
+-- cleared balance back, for the "doesn't match" message; 'Right ()'
+-- means the write happened.
+reconcileAccountIfMatches :: Connection -> AccountId -> Cents -> IO (Either Cents ())
+reconcileAccountIfMatches conn aid statementBalance = withTransaction conn $ do
+  txs <- listTransactionsForAccount conn aid
+  let cleared = clearedBalance aid txs
+  if cleared == statementBalance
+    then do
+      execute conn "UPDATE transactions SET status = ? WHERE account_id = ? AND status = ?" (Reconciled, aid, Cleared)
+      pure (Right ())
+    else pure (Left cleared)
+
 -- | Deletes a transaction's row(s): both legs sharing a @transfer_id@
 -- plus the shared @transfers@ row for a transfer, otherwise just the
 -- one row (its @transaction_lines@, if any, cascade via the foreign
--- key). Blocks on an already-'Reconciled' transaction
--- ('CannotModifyReconciledTransaction') — reconciling is meant to be a
--- lock. A no-op on an unknown id, consistent with 'setTransactionCleared'.
+-- key). Blocks on an already-'Reconciled' transaction, or one whose
+-- transfer sibling leg is already 'Reconciled' (AUDIT-02) — either way
+-- 'CannotModifyReconciledTransaction': reconciling a transfer is meant
+-- to lock *both* legs, since deleting one leg always deletes the other
+-- too. A no-op on an unknown id, consistent with 'setTransactionCleared'.
 deleteTransaction :: Connection -> TransactionId -> IO (Either DomainError ())
 deleteTransaction conn txId' = do
-  result <- withReplaceable conn txId' (\tx conn' -> deleteRowsFor conn' tx)
+  result <- withReplaceable conn txId' noKindCheck (\tx _siblings conn' -> Right <$> deleteRowsFor conn' tx)
   pure (() <$ result)
+
+-- | A no-op 'precheck' for 'withReplaceable': 'deleteTransaction' is the
+-- one caller that doesn't care what kind of transaction it's deleting.
+noKindCheck :: Transaction -> [Transaction] -> Either DomainError ()
+noKindCheck _ _ = Right ()
 
 -- | Deletes whatever row(s) back a transaction, without the
 -- 'Reconciled' guard or any surrounding transaction — a raw helper
@@ -392,33 +445,100 @@ deleteRowsFor conn tx = case txCategorization tx of
     execute conn "DELETE FROM transfers WHERE id = ?" (Only transferId)
   _ -> execute conn "DELETE FROM transactions WHERE id = ?" (Only (txId tx))
 
+-- | For a 'TransferLeg', every *other* row still sharing the same
+-- 'TransferId' (there's exactly one: the other leg) — fetched before
+-- any row is ever deleted, so 'withReplaceable''s callers can check or
+-- preserve that sibling leg's own state (AUDIT-02: its 'Reconciled'
+-- lock status; 'updateTransfer': its independent 'TransactionStatus').
+-- Always @[]@ for 'Inflow'\/'Categorized'.
+transferSiblingsOf :: Connection -> Transaction -> IO [Transaction]
+transferSiblingsOf conn tx = case txCategorization tx of
+  TransferLeg transferId _ _ -> do
+    rows <-
+      query
+        conn
+        "SELECT id, account_id, date, payee, status, kind, amount, transfer_id, counterpart_account_id, import_hash \
+        \FROM transactions WHERE transfer_id = ? AND id != ?"
+        (transferId, txId tx)
+    traverse (rowToTransaction conn) rows
+  _ -> pure []
+
+-- | Blocks on an already-'Reconciled' transaction, or one whose
+-- transfer sibling leg is already 'Reconciled' (AUDIT-02): without the
+-- second half of this check, deleting or editing the *not-yet-cleared*
+-- leg of a part-reconciled transfer would silently delete its
+-- 'Reconciled' counterpart leg too (@deleteRowsFor@ always removes both
+-- legs together), corrupting the other account's already-confirmed
+-- balance.
+lockCheck :: Transaction -> [Transaction] -> Either DomainError ()
+lockCheck tx siblings
+  | txStatus tx == Reconciled || any ((== Reconciled) . txStatus) siblings = Left CannotModifyReconciledTransaction
+  | otherwise = Right ()
+
 -- | The shared guard+atomicity behind every "edit" (see "$editing") and
--- 'deleteTransaction': look up the transaction, block with
--- 'CannotModifyReconciledTransaction' if it's already 'Reconciled', and
--- — only once the caller's own validation (on-budget-only, distinct
--- accounts, matching budget status — whatever its specific @insert*@
--- would also check) has already passed — delete its old row(s) and run
--- @replaceWith@ in one SQL transaction. 'Nothing' means the id doesn't
+-- 'deleteTransaction': inside one SQL transaction — look up the
+-- transaction (closing the read-before-transaction TOCTOU in AUDIT-05,
+-- where two concurrent double-click requests could otherwise both see
+-- "not yet deleted" and each insert their own replacement, duplicating
+-- the edit), block with 'lockCheck' (AUDIT-02), run @precheck@ (e.g.
+-- "is this actually the kind of transaction this edit expects",
+-- AUDIT-03.2) *before* touching any row, and only once both pass delete
+-- the old row(s) and run @replaceWith@. 'Nothing' means the id doesn't
 -- exist: a no-op, not an error.
 withReplaceable
-  :: Connection -> TransactionId -> (Transaction -> Connection -> IO a) -> IO (Either DomainError (Maybe a))
-withReplaceable conn txId' replaceWith = do
+  :: Connection
+  -> TransactionId
+  -> (Transaction -> [Transaction] -> Either DomainError ())
+  -> (Transaction -> [Transaction] -> Connection -> IO (Either DomainError a))
+  -> IO (Either DomainError (Maybe a))
+withReplaceable conn txId' precheck replaceWith = withTransaction conn $ do
   maybeTx <- getTransaction conn txId'
   case maybeTx of
     Nothing -> pure (Right Nothing)
-    Just tx
-      | txStatus tx == Reconciled -> pure (Left CannotModifyReconciledTransaction)
-      | otherwise ->
-          Right . Just <$> withTransaction conn (deleteRowsFor conn tx >> replaceWith tx conn)
+    Just tx -> do
+      siblings <- transferSiblingsOf conn tx
+      case lockCheck tx siblings >> precheck tx siblings of
+        Left err -> pure (Left err)
+        Right () -> do
+          deleteRowsFor conn tx
+          result <- replaceWith tx siblings conn
+          pure (fmap Just result)
+
+-- | AUDIT-03.1: an edit that keeps the transaction on the *same*
+-- account preserves its 'txImportHash' (so Track C's bank-statement
+-- import still recognizes this row and doesn't re-import a duplicate);
+-- moving it to a different account drops the hash, since it's then no
+-- longer standing in for that one imported row.
+preservedImportHash :: AccountId -> Transaction -> Maybe ImportHash
+preservedImportHash newAccId tx
+  | newAccId == txAccount tx = txImportHash tx
+  | otherwise = Nothing
+
+-- | AUDIT-03.2 'precheck's: reject an edit whose target id doesn't
+-- actually hold the kind of transaction that edit form expects (e.g.
+-- posting to @edit-inflow@ for an id that's really a split or a
+-- transfer leg) — without this, 'withReplaceable' would delete whatever
+-- that row actually was (both legs, for a transfer!) and silently
+-- replace it with the wrong kind.
+expectInflow, expectCategorized, expectTransferLeg :: Transaction -> [Transaction] -> Either DomainError ()
+expectInflow tx _ = case txCategorization tx of
+  Inflow _ -> Right ()
+  _        -> Left TransactionKindMismatch
+expectCategorized tx _ = case txCategorization tx of
+  Categorized _ -> Right ()
+  _             -> Left TransactionKindMismatch
+expectTransferLeg tx _ = case txCategorization tx of
+  TransferLeg {} -> Right ()
+  _              -> Left TransactionKindMismatch
 
 -- | Edits an inflow's date/payee/account/amount in place (same shape,
--- new 'TransactionId' — see "$editing"). No validation of its own,
--- matching 'insertInflow'.
+-- new 'TransactionId' — see "$editing"). No validation of its own
+-- beyond 'expectInflow', matching 'insertInflow'.
 updateInflow
   :: Connection -> TransactionId -> AccountId -> Day -> Text -> Cents -> IO (Either DomainError (Maybe Transaction))
 updateInflow conn txId' accId day payee amount =
-  withReplaceable conn txId' $ \tx conn' ->
-    insertInflow conn' accId day payee (txStatus tx) amount Nothing
+  withReplaceable conn txId' expectInflow $ \tx _siblings conn' ->
+    Right <$> insertInflow conn' accId day payee (txStatus tx) amount (preservedImportHash accId tx)
 
 -- | Edits a split transaction's date/payee/account/lines in place (same
 -- shape, new 'TransactionId'). Repeats 'insertSpending's own
@@ -436,14 +556,19 @@ updateSpending conn txId' accId day payee lines' = do
   acc <- requireAccount conn accId
   if not (isOnBudget acc)
     then pure (Left CategorizedTransactionRequiresOnBudgetAccount)
-    else withReplaceable conn txId' $ \tx conn' ->
-           insertSpendingRows conn' accId day payee (txStatus tx) lines' Nothing
+    else withReplaceable conn txId' expectCategorized $ \tx _siblings conn' ->
+           Right <$> insertSpendingRows conn' accId day payee (txStatus tx) lines' (preservedImportHash accId tx)
 
 -- | Edits a transfer's date/amount/both accounts in place — both legs
 -- and the @transfers@ row are replaced together (there's no single
 -- "the" leg being edited; editing either side's form edits the whole
--- pair). Repeats 'insertTransfer's own distinct-accounts/matching-
--- budget-status validation before touching anything.
+-- pair). Repeats 'insertTransfer's own distinct-accounts/positive-
+-- amount/matching-budget-status validation before touching anything.
+-- Preserves each side's own prior 'TransactionStatus' individually
+-- (AUDIT-02) by matching the new "from"/"to" accounts back to whichever
+-- old leg (if any) was already on that account — a newly swapped-in
+-- account (the transfer's accounts changed, not just its amount/date)
+-- starts that side fresh at 'Uncleared', same as a brand new transfer.
 updateTransfer
   :: Connection
   -> TransactionId
@@ -453,10 +578,19 @@ updateTransfer
   -> IO (Either DomainError (Maybe (Transaction, Transaction)))
 updateTransfer conn txId' (fromAccId, toAccId) day amount
   | fromAccId == toAccId = pure (Left TransferRequiresDistinctAccounts)
+  | amount <= zeroCents = pure (Left TransferAmountMustBePositive)
   | otherwise = do
       fromAcc <- requireAccount conn fromAccId
       toAcc <- requireAccount conn toAccId
       if not (sameBudgetStatus fromAcc toAcc)
         then pure (Left TransferRequiresMatchingBudgetStatus)
-        else withReplaceable conn txId' $ \tx conn' ->
-               insertTransferRows conn' (fromAccId, toAccId) day (txStatus tx) amount
+        else withReplaceable conn txId' expectTransferLeg $ \tx siblings conn' ->
+               let oldLegs = tx : siblings
+                   statusForAccount aid = maybe Uncleared txStatus (find ((== aid) . txAccount) oldLegs)
+               in Right
+                    <$> insertTransferRows
+                          conn'
+                          (fromAccId, toAccId)
+                          day
+                          (statusForAccount fromAccId, statusForAccount toAccId)
+                          amount

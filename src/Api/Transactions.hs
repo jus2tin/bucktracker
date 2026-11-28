@@ -36,18 +36,19 @@
 -- rejected server-side on every *create* ('withValidInflow'\/
 -- 'withValidSpending'\/'withValidTransfer' hand their fetched
 -- @[Account]@\/@[Category]@ to the caller precisely so each create
--- handler can add that check on top) but deliberately *not* on an edit
--- of a transaction that's already on one — the account/category picker
--- a create form offers only ever lists active (and, for the spending
--- form, on-budget-only) entities to begin with, so this is defense in
--- depth for a direct POST, not something reachable through the UI. An
--- edit form, by contrast, still needs to show the transaction's
--- *current* account/category even if it's since been archived or (for
--- spending) is the "wrong" budget type — 'accountChoices'\/
--- 'categoryChoices' append that one entity back on if the active-only
--- filter would otherwise have dropped it, so a @\<select\>@ never
--- silently loses its selected option and reassigns the transaction on
--- save.
+-- handler can add that check on top). An edit form still needs to show
+-- the transaction's *current* account/category even if it's since been
+-- archived or (for spending) is the "wrong" budget type —
+-- 'accountChoices'\/'categoryChoices' append that one entity back on if
+-- the active-only filter would otherwise have dropped it, so a
+-- @\<select\>@ never silently loses its selected option and reassigns
+-- the transaction on save — but an edit may only ever *keep* an
+-- existing archived account/category, never move the transaction onto
+-- a *different*, newly chosen one: 'movesOntoArchivedAccount'\/
+-- 'movesOntoArchivedCategory'\/'movesOntoArchivedTransferAccount' (AUDIT-03.3)
+-- compare the posted id(s) against the transaction's id(s) *before*
+-- this edit, not just against the active-only picker a create form
+-- offers.
 module Api.Transactions
   ( TransactionsApi
   , transactionsServer
@@ -62,6 +63,7 @@ import qualified Data.Text.Read as TextRead
 import Data.Time (Day, fromGregorianValid)
 import GHC.Generics (Generic)
 import Lucid
+import Lucid.Base (makeAttribute)
 import Servant
 import Servant.HTML.Lucid (HTML)
 
@@ -92,6 +94,7 @@ import Domain.Transaction
   , TransactionLine (TransactionLine, tlAmount, tlCategory)
   , transactionAmount
   )
+import Domain.Validation (validatePayee)
 import Domain.Types
   ( AccountId (AccountId)
   , CategoryId (CategoryId)
@@ -207,11 +210,13 @@ withValidInflow hx form go = case parseAccountId (inflowAccountId form) of
     Nothing -> withError hx "Invalid date."
     Just day -> case parseNonZeroSignedEuros (inflowAmount form) of
       Nothing -> withError hx "Invalid amount."
-      Just amt -> do
-        accounts <- withConn Db.listAccounts
-        if not (any ((== aid) . accId) accounts)
-          then withError hx "Unknown account."
-          else go accounts aid day (inflowPayee form) amt
+      Just amt -> case validatePayee (inflowPayee form) of
+        Left _ -> withError hx "Invalid payee."
+        Right payee -> do
+          accounts <- withConn Db.listAccounts
+          if not (any ((== aid) . accId) accounts)
+            then withError hx "Unknown account."
+            else go accounts aid day payee amt
 
 createInflowHandler :: Maybe Text -> NewInflowForm -> AppM (Html ())
 createInflowHandler hx form = withValidInflow hx form $ \accounts aid day payee amt ->
@@ -222,12 +227,27 @@ createInflowHandler hx form = withValidInflow hx form $ \accounts aid day payee 
       renderDefault hx
 
 editInflowHandler :: Maybe Text -> Int64 -> NewInflowForm -> AppM (Html ())
-editInflowHandler hx rawId form = withValidInflow hx form $ \_accounts aid day payee amt -> do
-  result <- withConn (\conn -> Db.updateInflow conn (TransactionId rawId) aid day payee amt)
-  case result of
-    Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
-    Left _ -> withError hx "Could not update transaction."
-    Right _ -> renderDefault hx
+editInflowHandler hx rawId form = withValidInflow hx form $ \accounts aid day payee amt -> do
+  let txId' = TransactionId rawId
+  existing <- withConn (\conn -> Db.getTransaction conn txId')
+  if maybe False (movesOntoArchivedAccount accounts aid) existing
+    then withError hx "Cannot move a transaction onto an archived account."
+    else do
+      result <- withConn (\conn -> Db.updateInflow conn txId' aid day payee amt)
+      case result of
+        Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
+        Left TransactionKindMismatch -> withError hx "This is no longer that kind of transaction; refresh and try again."
+        Left _ -> withError hx "Could not update transaction."
+        Right _ -> renderDefault hx
+
+-- | True when @aid@ differs from @existing@'s current account and is
+-- itself archived (AUDIT-03.3): an edit form always keeps showing a
+-- transaction's *existing* account even if it's since been archived
+-- (see the module header), but a crafted POST must not be able to move
+-- it onto a *different*, newly chosen archived one.
+movesOntoArchivedAccount :: [Account] -> AccountId -> Transaction -> Bool
+movesOntoArchivedAccount accounts aid existing =
+  aid /= txAccount existing && maybe False isArchived (find ((== aid) . accId) accounts)
 
 -- | Parses and validates a spending (split) form's fields, then hands
 -- them (along with the accounts/categories just fetched to validate
@@ -243,20 +263,27 @@ withValidSpending hx form go = case parseAccountId (spendingAccountId form) of
   Nothing -> withError hx "Unknown account."
   Just aid -> case parseIsoDate (spendingDate form) of
     Nothing -> withError hx "Invalid date."
+    -- AUDIT-03.4: a crafted POST submitting unequal numbers of
+    -- lineCategoryId/lineAmount fields would otherwise have 'zip'
+    -- silently drop whichever trailing fields don't pair up.
+    Just _day | length (spendingLineCategoryIds form) /= length (spendingLineAmounts form) ->
+      withError hx "Mismatched category/amount fields."
     Just day ->
       case parseSplitLines (zip (spendingLineCategoryIds form) (spendingLineAmounts form)) of
         Left err -> withError hx err
         Right [] -> withError hx "A split needs at least one line."
-        Right (line1 : restLines) -> do
-          let lines' = line1 :| restLines
-          accounts <- withConn Db.listAccounts
-          categories <- withConn Db.listCategories
-          if not (any ((== aid) . accId) accounts)
-            then withError hx "Unknown account."
-            else
-              if not (all (\l -> any ((== tlCategory l) . catId) categories) (toList lines'))
-                then withError hx "Unknown category."
-                else go accounts categories aid day (spendingPayee form) lines'
+        Right (line1 : restLines) -> case validatePayee (spendingPayee form) of
+          Left _ -> withError hx "Invalid payee."
+          Right payee -> do
+            let lines' = line1 :| restLines
+            accounts <- withConn Db.listAccounts
+            categories <- withConn Db.listCategories
+            if not (any ((== aid) . accId) accounts)
+              then withError hx "Unknown account."
+              else
+                if not (all (\l -> any ((== tlCategory l) . catId) categories) (toList lines'))
+                  then withError hx "Unknown category."
+                  else go accounts categories aid day payee lines'
 
 createSpendingHandler :: Maybe Text -> NewSpendingForm -> AppM (Html ())
 createSpendingHandler hx form = withValidSpending hx form $ \accounts categories aid day payee lines' ->
@@ -274,14 +301,36 @@ createSpendingHandler hx form = withValidSpending hx form $ \accounts categories
             Right _ -> renderDefault hx
 
 editSpendingHandler :: Maybe Text -> Int64 -> NewSpendingForm -> AppM (Html ())
-editSpendingHandler hx rawId form = withValidSpending hx form $ \_accounts _categories aid day payee lines' -> do
-  result <- withConn (\conn -> Db.updateSpending conn (TransactionId rawId) aid day payee lines')
-  case result of
-    Left CategorizedTransactionRequiresOnBudgetAccount ->
-      withError hx "Categorized transactions are not allowed on tracking accounts."
-    Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
-    Left _ -> withError hx "Could not update transaction."
-    Right _ -> renderDefault hx
+editSpendingHandler hx rawId form = withValidSpending hx form $ \accounts categories aid day payee lines' -> do
+  let txId' = TransactionId rawId
+  existing <- withConn (\conn -> Db.getTransaction conn txId')
+  if maybe False (movesOntoArchivedAccount accounts aid) existing
+    then withError hx "Cannot move a transaction onto an archived account."
+    else if maybe False (movesOntoArchivedCategory categories lines') existing
+      then withError hx "Cannot categorize a transaction against a newly chosen archived category."
+      else do
+        result <- withConn (\conn -> Db.updateSpending conn txId' aid day payee lines')
+        case result of
+          Left CategorizedTransactionRequiresOnBudgetAccount ->
+            withError hx "Categorized transactions are not allowed on tracking accounts."
+          Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
+          Left TransactionKindMismatch -> withError hx "This is no longer that kind of transaction; refresh and try again."
+          Left _ -> withError hx "Could not update transaction."
+          Right _ -> renderDefault hx
+
+-- | Same reasoning as 'movesOntoArchivedAccount' (AUDIT-03.3), but for
+-- each split line's category: a line keeping one of the transaction's
+-- *existing* categories is fine even if archived; a line naming a
+-- *different*, newly chosen archived category is not.
+movesOntoArchivedCategory :: [Category] -> NonEmpty TransactionLine -> Transaction -> Bool
+movesOntoArchivedCategory categories newLines existing = case txCategorization existing of
+  Categorized oldLines ->
+    any
+      (\l -> tlCategory l `notElem` map tlCategory (toList oldLines) && archivedCat (tlCategory l))
+      (toList newLines)
+  _ -> False
+  where
+    archivedCat cid = maybe False isArchivedCategory (find ((== cid) . catId) categories)
 
 -- | Whether a split line's category is archived — 'createSpendingHandler'\'s
 -- own guard against new spending landing on one (the existence check
@@ -326,15 +375,34 @@ createTransferHandler hx form = withValidTransfer hx form $ \accounts fromAid to
         Right _ -> renderDefault hx
 
 editTransferHandler :: Maybe Text -> Int64 -> NewTransferForm -> AppM (Html ())
-editTransferHandler hx rawId form = withValidTransfer hx form $ \_accounts fromAid toAid day amt -> do
-  result <- withConn (\conn -> Db.updateTransfer conn (TransactionId rawId) (fromAid, toAid) day amt)
-  case result of
-    Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
-    Left TransferRequiresMatchingBudgetStatus ->
-      withError hx "Cannot transfer between an on-budget and a tracking account."
-    Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
-    Left _ -> withError hx "Could not update transfer."
-    Right _ -> renderDefault hx
+editTransferHandler hx rawId form = withValidTransfer hx form $ \accounts fromAid toAid day amt -> do
+  let txId' = TransactionId rawId
+  existing <- withConn (\conn -> Db.getTransaction conn txId')
+  if maybe False (movesOntoArchivedTransferAccount accounts fromAid toAid) existing
+    then withError hx "Cannot move a transfer onto an archived account."
+    else do
+      result <- withConn (\conn -> Db.updateTransfer conn txId' (fromAid, toAid) day amt)
+      case result of
+        Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
+        Left TransferRequiresMatchingBudgetStatus ->
+          withError hx "Cannot transfer between an on-budget and a tracking account."
+        Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
+        Left TransactionKindMismatch -> withError hx "This is no longer that kind of transaction; refresh and try again."
+        Left _ -> withError hx "Could not update transfer."
+        Right _ -> renderDefault hx
+
+-- | Same reasoning as 'movesOntoArchivedAccount' (AUDIT-03.3), but for
+-- a transfer's two accounts: either side keeping one of the transfer's
+-- *existing* two accounts is fine even if archived; naming a
+-- *different*, newly chosen archived account on either side is not.
+movesOntoArchivedTransferAccount :: [Account] -> AccountId -> AccountId -> Transaction -> Bool
+movesOntoArchivedTransferAccount accounts fromAid toAid existing = case txCategorization existing of
+  TransferLeg _ counterpartAcc _ ->
+    let oldAccs = [txAccount existing, counterpartAcc]
+    in any (\aid -> aid `notElem` oldAccs && archivedAcc aid) [fromAid, toAid]
+  _ -> False
+  where
+    archivedAcc aid = maybe False isArchived (find ((== aid) . accId) accounts)
 
 -- | Toggles one transaction between Uncleared and Cleared from the
 -- register — the first step of reconciling (the second, account-wide
@@ -394,19 +462,34 @@ renderFragment hx ym accountFilter err = do
     ( pageOrFragment
         hx
         "Transactions"
-        (transactionsContent err today ym accountFilter accounts categories transactions)
+        (transactionsContent err today ym accountFilter accounts categories transactionsInMonth transactions)
     )
 
+-- | @allTxsInMonth@ is deliberately *not* narrowed by @accountFilter@
+-- (unlike @transactions@, the rows actually rendered): a transfer's two
+-- legs share the same date, so both are always in the same month, but
+-- filtering to one account would otherwise drop the very row
+-- 'isLockedTransaction' needs to see to catch a part-reconciled
+-- transfer (AUDIT-02.4).
 transactionsContent
-  :: Maybe Text -> Day -> YearMonth -> Maybe AccountId -> [Account] -> [Category] -> [Transaction] -> Html ()
-transactionsContent err today ym accountFilter accounts categories transactions = div_ [id_ "transactions-content"] $ do
-  errorBanner err
-  monthNav ym accountFilter
-  accountFilterBanner accounts accountFilter
-  newInflowForm today accounts
-  newSpendingForm today accounts categories
-  newTransferForm today accounts
-  transactionsTable accounts categories transactions
+  :: Maybe Text
+  -> Day
+  -> YearMonth
+  -> Maybe AccountId
+  -> [Account]
+  -> [Category]
+  -> [Transaction]
+  -> [Transaction]
+  -> Html ()
+transactionsContent err today ym accountFilter accounts categories allTxsInMonth transactions =
+  div_ [id_ "transactions-content"] $ do
+    errorBanner err
+    monthNav ym accountFilter
+    accountFilterBanner accounts accountFilter
+    newInflowForm today accounts
+    newSpendingForm today accounts categories
+    newTransferForm today accounts
+    transactionsTable accounts categories allTxsInMonth transactions
 
 -- | @\<- Prev | YYYY-MM | Next -\>@, each a plain link to
 -- @\/transactions?month=YYYY-MM@ (carrying the account filter along, if
@@ -468,12 +551,26 @@ accountOption selected acc =
     idText (AccountId i) = Text.pack (show i)
     label = accName acc <> (if isArchived acc then " (archived)" else "")
 
+-- | @data-archived-extra@ marks an archived category's @\<option\>@
+-- (AUDIT-06.2): when the split editor's @addLine()@ clones the last
+-- row (@static/app.js@), it strips any option carrying this attribute
+-- from the clone, so a *new* split line never silently inherits a
+-- since-archived category just because it happened to be the last
+-- row's current selection.
 categoryOption :: Maybe CategoryId -> Category -> Html ()
 categoryOption selected cat =
-  option_ (value_ (idText (catId cat)) : [selected_ "" | selected == Just (catId cat)]) (toHtml label)
+  option_
+    ( value_ (idText (catId cat))
+        : [selected_ "" | selected == Just (catId cat)]
+        ++ [dataArchivedExtra_ "" | isArchivedCategory cat]
+    )
+    (toHtml label)
   where
     idText (CategoryId i) = Text.pack (show i)
     label = catName cat <> (if isArchivedCategory cat then " (archived)" else "")
+
+dataArchivedExtra_ :: Text -> Attribute
+dataArchivedExtra_ = makeAttribute "data-archived-extra"
 
 -- | Wrapped in @\<details\>@ (id @new-inflow-details@, targeted by the
 -- @i@ keyboard shortcut in @static/app.js@) rather than a
@@ -645,14 +742,14 @@ editTransferForm accounts tx counterpartAcc legAmount =
       | legAmount < zeroCents = (txAccount tx, counterpartAcc, negateCents legAmount)
       | otherwise = (counterpartAcc, txAccount tx, legAmount)
 
-transactionsTable :: [Account] -> [Category] -> [Transaction] -> Html ()
-transactionsTable accounts categories transactions = table_ $ do
+transactionsTable :: [Account] -> [Category] -> [Transaction] -> [Transaction] -> Html ()
+transactionsTable accounts categories allTxsInMonth transactions = table_ $ do
   thead_
     (tr_ (mapM_ (th_ . toHtml) (["Date", "Account", "Payee", "Category", "Amount", "Status", "", "", ""] :: [Text])))
-  tbody_ (mapM_ (transactionRow accounts categories) transactions)
+  tbody_ (mapM_ (transactionRow accounts categories allTxsInMonth) transactions)
 
-transactionRow :: [Account] -> [Category] -> Transaction -> Html ()
-transactionRow accounts categories tx = tr_ $ do
+transactionRow :: [Account] -> [Category] -> [Transaction] -> Transaction -> Html ()
+transactionRow accounts categories allTxsInMonth tx = tr_ $ do
   td_ (toHtml (dayText (txDate tx)))
   td_ (toHtml (accountNameFor accounts (txAccount tx)))
   td_ (toHtml (txPayee tx))
@@ -660,8 +757,8 @@ transactionRow accounts categories tx = tr_ $ do
   td_ [class_ "amount"] (toHtml (centsToEuroText (transactionAmount tx)))
   td_ (toHtml (transactionStatusToText (txStatus tx)))
   td_ (clearButton tx)
-  td_ (editControls accounts categories tx)
-  td_ (deleteButton tx)
+  td_ (editControls accounts categories allTxsInMonth tx)
+  td_ (deleteButton allTxsInMonth tx)
 
 -- | Lets the register mark a transaction as seen on the bank statement
 -- (Uncleared <-> Cleared, see Domain.Types.toggleCleared) — the first
@@ -678,16 +775,36 @@ clearButton tx
              [type_ "submit", hxPost_ routePath, hxTarget_ "#transactions-content", hxSwap_ "outerHTML"]
              (if txStatus tx == Uncleared then "Clear" else "Unclear")
 
+-- | True once a transaction can no longer be edited/deleted: either it
+-- is itself 'Reconciled', or (AUDIT-02.4) it's one leg of a transfer
+-- whose *other* leg already is — 'Db.deleteTransaction'/'Db.updateTransfer'
+-- already enforce that server-side (deleting or replacing one leg
+-- always touches both), so this just keeps the register from offering
+-- a control that can only ever fail.
+isLockedTransaction :: [Transaction] -> Transaction -> Bool
+isLockedTransaction allTxsInMonth tx
+  | txStatus tx == Reconciled = True
+  | otherwise = case txCategorization tx of
+      TransferLeg transferId _ _ -> any (isReconciledSiblingOf transferId tx) allTxsInMonth
+      _ -> False
+  where
+    isReconciledSiblingOf transferId this other =
+      txId other /= txId this
+        && txStatus other == Reconciled
+        && case txCategorization other of
+             TransferLeg otherTransferId _ _ -> otherTransferId == transferId
+             _ -> False
+
 -- | A per-row @\<details\>@ holding whichever edit form matches this
 -- transaction's kind ('editInflowForm'\/'editSpendingForm'\/
 -- 'editTransferForm') — the plan's "inline row" alternative to a
 -- @\<dialog\>@ (Track A Step 5), same reasoning as the entry drawers in
--- Step 4. Nothing renders here once a transaction is 'Reconciled':
--- there's nothing a submit could do but fail server-side anyway (see
+-- Step 4. Nothing renders here once 'isLockedTransaction': there's
+-- nothing a submit could do but fail server-side anyway (see
 -- 'Db.updateInflow' and friends).
-editControls :: [Account] -> [Category] -> Transaction -> Html ()
-editControls accounts categories tx
-  | txStatus tx == Reconciled = mempty
+editControls :: [Account] -> [Category] -> [Transaction] -> Transaction -> Html ()
+editControls accounts categories allTxsInMonth tx
+  | isLockedTransaction allTxsInMonth tx = mempty
   | otherwise =
       details_ [id_ ("edit-details-" <> transactionIdText (txId tx))] $ do
         summary_ "Edit"
@@ -696,13 +813,13 @@ editControls accounts categories tx
           TransferLeg _ counterpartAcc amt -> editTransferForm accounts tx counterpartAcc amt
           Categorized ls -> editSpendingForm accounts categories tx ls
 
--- | No button once a transaction is 'Reconciled' — the server-side
--- guard in 'Db.deleteTransaction' is the real enforcement
+-- | No button once 'isLockedTransaction' — the server-side guard in
+-- 'Db.deleteTransaction' is the real enforcement
 -- ('CannotModifyReconciledTransaction'), this is just not offering a
 -- control that can only ever fail.
-deleteButton :: Transaction -> Html ()
-deleteButton tx
-  | txStatus tx == Reconciled = mempty
+deleteButton :: [Transaction] -> Transaction -> Html ()
+deleteButton allTxsInMonth tx
+  | isLockedTransaction allTxsInMonth tx = mempty
   | otherwise =
       let routePath = "/transactions/" <> transactionIdText (txId tx) <> "/delete"
       in form_ [method_ "post", action_ routePath] $
@@ -771,11 +888,18 @@ parseInt64 t = case TextRead.decimal t of
 
 -- | Parses an HTML @\<input type="date"\>@ value (@"YYYY-MM-DD"@),
 -- total and without 'Data.Time.Format.parseTimeM' (which can throw).
+-- Bounds the year to @[1900,2200]@, matching 'Domain.Types.mkYearMonth'
+-- (AUDIT-01): 'Data.Time.fromGregorianValid' otherwise happily accepts
+-- an astronomically large year (e.g. @"99999999-01-01"@), which would
+-- then make 'Domain.Budget.monthsThrough'/'rolloverMonths' fold over
+-- billions of months the moment that transaction's month is reached.
 parseIsoDate :: Text -> Maybe Day
 parseIsoDate t = case Text.splitOn "-" t of
   [y, m, d] -> do
     y' <- parseInt64 y
     m' <- parseInt64 m
     d' <- parseInt64 d
-    fromGregorianValid (fromIntegral y') (fromIntegral m') (fromIntegral d')
+    if y' < 1900 || y' > 2200
+      then Nothing
+      else fromGregorianValid (fromIntegral y') (fromIntegral m') (fromIntegral d')
   _ -> Nothing

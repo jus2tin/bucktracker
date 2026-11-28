@@ -21,6 +21,7 @@ import Domain.Types
   , TransactionStatus
   , TransferId
   , negateCents
+  , zeroCents
   )
 
 -- | One line of an (optionally split) transaction.
@@ -97,7 +98,11 @@ mkSpendingTransaction tid acc day payee status lines' importHash =
 -- | Build the two linked halves of a transfer. By construction they
 -- always sum to zero (invariant 2): one half is literally the negation
 -- of the other, so there's no separate validation that could forget to
--- do that. The only failure mode: both sides are the same account.
+-- do that. The only failure modes: both sides are the same account, or
+-- the amount isn't strictly positive (AUDIT-08) — the direction of a
+-- transfer is decided entirely by which account is "from" and which is
+-- "to", so a zero/negative amount here would be a second, conflicting
+-- way to flip that direction.
 mkTransferPair
   :: TransferId
   -> (TransactionId, AccountId) -- ^ (id, account) of the side that *loses* the money
@@ -108,6 +113,7 @@ mkTransferPair
   -> Either DomainError (Transaction, Transaction)
 mkTransferPair tid (fromTxId, fromAcc) (toTxId, toAcc) day status amount
   | fromAcc == toAcc = Left TransferRequiresDistinctAccounts
+  | amount <= zeroCents = Left TransferAmountMustBePositive
   | otherwise = Right
       ( Transaction fromTxId fromAcc day "Transfer" status
           (TransferLeg tid toAcc (negateCents amount)) Nothing
