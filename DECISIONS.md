@@ -476,9 +476,11 @@ later.
        categories, and new transactions on archived accounts/categories
        are rejected server-side; `Tracking` accounts are excluded from
        the spending create picker; `Reconcile` is hidden on archived
-       accounts; and empty-state onboarding prompts guide first-run
-       setup. (See `docs/reviews/2026-11-27-post-track-a-audit.md`
-       `AUDIT-04` for a minor future-month edge case queued for Track B.)
+       accounts (and archiving an account requires every row on it to be
+       `Reconciled` first, `AUDIT-04`); category archiving checks all
+       folded months `>= today` so future assignments cannot be stranded
+       (`hasNonZeroBalanceFromNowOn`, `AUDIT-04`); and empty-state
+       onboarding prompts guide first-run setup.
 
 ## 12. Phase 2 decisions: Frontend & UX foundation, inline editing & bank import (2026-11-27)
 

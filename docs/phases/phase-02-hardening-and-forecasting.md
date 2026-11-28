@@ -3,10 +3,10 @@
 - **Date:** 2026-11-27
 - **Author:** Gemini (Architect), for Justin (Product Owner) & Claude (Developer)
 - **Prerequisite Review:** [`docs/reviews/2026-11-27-mvp-adversarial-review.md`](../reviews/2026-11-27-mvp-adversarial-review.md)
-- **Architectural Decisions:** [`DECISIONS.md` §§8–12](../../DECISIONS.md)
+- **Architectural Decisions:** [`DECISIONS.md` §§8–13](../../DECISIONS.md)
 
 > **Note on Phase Naming:** Earlier sections of [`DECISIONS.md`](../../DECISIONS.md) referred to the three internal layers of the initial build (`Domain`, `Db`, `Api`) as "Phase 1/2/3". At the product level, that initial MVP candidate was **Product Phase 1**. This document defines **Product Phase 2+**, organized into sequential tracks of concrete, commit-sized steps:
-> - **Track A (Steps 1–6):** Frontend & UX Foundation (Servant `/static/*`, Pico CSS, Alpine.js micro-interactions, inline `/budget` editing) + MVP showstopper remediation.
+> - **Track A (Steps 1–6 — ✅ Complete):** Frontend & UX Foundation (Servant `/static/*`, Pico CSS, Alpine.js micro-interactions, inline `/budget` editing) + MVP showstopper remediation + post-Track-A `AUDIT-01..08` hardening (`c599309`, `9ae5492`).
 > - **Track B (Steps 7–9, 11–12):** Security middleware, SQLite WAL concurrency, online backups, and zero-warning `-Werror` CI — **`v0.1.0` sign-off gate** (turnkey spec: [`track-b-spec.md`](track-b-spec.md)).
 > - **Track C (Step 10):** ABN AMRO `CAMT.053` / `.TAB` bank statement import (turnkey spec: [`track-c-abn-amro-import-spec.md`](track-c-abn-amro-import-spec.md)).
 > - **Track D (Steps 13–17 + R-1..R-4):** Zero-JS Net-Worth & Monthly Spending Reports (`/reports`, spec: [`track-d-reporting-spec.md`](track-d-reporting-spec.md)) + Scheduled Cash-Flow Projections (`/forecast`).
@@ -81,11 +81,11 @@
   - Added the missing **Account** column to `transactionsTable`; `?account=<id>` filters the register (riding along on the Prev/Next links so it survives month navigation) with an `accountFilterBanner` ("Showing: X [show all accounts]"); account names on `/accounts` now link to `/transactions?account=<id>`.
   - **Tests:** `test/Api/TransactionsSpec.hs` (filtering, the Account column, the Accounts-page link).
 
-### Step 6 — Two-Way Archiving, Server-Side Entity Guards & Track A Sign-Off (`H-1`, `H-2`, `L-1`, `L-2`)
-- [ ] Add idempotent `archive*` (`WHERE id = ? AND archived_at IS NULL`), `unarchiveAccount`, `unarchiveCategoryGroup`, and `unarchiveCategory` in `Db.Account` / `Db.Category`, plus `hx-confirm` on every `Archive` button and `Unarchive` controls on `/accounts` and `/categories` (`DECISIONS.md` §11).
-- [ ] Enforce server-side guards in `Db.*` (returning `DomainError`s): reject new transactions/assignments on archived accounts/categories, reject creating categories in archived groups, block archiving accounts/categories with non-zero balances (or active child categories), filter `Tracking` accounts out of the Spending form's account picker, hide `reconcileForm` on archived accounts, and show onboarding empty states when zero accounts/categories exist.
-- [ ] Fix doc drift (`ARCHITECTURE.md`, `Api/Transactions.hs` header comment, `package.yaml` `github: "jus2tin/bucktracker"`, `CHANGELOG.md`).
-- [ ] **Track A Exit Gate:** Write `docs/handoffs/YYYY-MM-DD-phase-02-track-a.md`. Bucktracker is now a complete, polished, offline-capable daily money tracker.
+### Step 6 — Two-Way Archiving, Server-Side Entity Guards & Track A Sign-Off (`H-1`, `H-2`, `L-1`, `L-2`) ✅ Done
+- [x] Added idempotent `archive*` (`WHERE id = ? AND archived_at IS NULL`), `unarchiveAccount`, `unarchiveCategoryGroup`, and `unarchiveCategory` in `Db.Account` / `Db.Category`, plus `hx-confirm` on every `Archive` button and `Unarchive` controls on `/accounts` and `/categories` (`DECISIONS.md` §11, commit `c599309`).
+- [x] Enforced server-side guards: rejected new transactions/assignments on archived accounts/categories (and cross-archive reassignment on edits via `movesOntoArchived*`), rejected creating categories in archived groups (`ArchivedCategoryGroup`), blocked archiving accounts with non-zero balance or unreconciled rows and categories with non-zero balance in any month `>= today` (`AUDIT-04`), filtered `Tracking` accounts out of the Spending form's account picker, hid `reconcileForm` on archived accounts, and added first-run onboarding banners.
+- [x] Resolved all post-Track-A audit tickets (`AUDIT-01`..`AUDIT-08`, commit `9ae5492`; 222 passing tests) and synced `ARCHITECTURE.md`, `DECISIONS.md`, `package.yaml` (`github: "jus2tin/bucktracker"`), and `CHANGELOG.md`.
+- [x] **Track A Exit Gate:** Recorded in [`docs/handoffs/2026-11-27-phase-02-track-a.md`](../handoffs/2026-11-27-phase-02-track-a.md). Bucktracker is now a complete, polished, offline-capable daily money tracker.
 
 ---
 
@@ -107,7 +107,7 @@
 - [ ] Collapse multiple `withConn` calls per HTTP handler in `src/Api/*` into **one `withConn` per request** (inside a consistent read transaction for multi-table reads), and replace the N+1 `fetchLines` loop in `Db.Transaction` with a single batched `transaction_lines` query.
 
 ### Step 9 — Domain, Validation, Config & Schema Guardrails (`M-1`, `M-3`, `M-4`, `M-5`, `L-3`)
-- [ ] Reject `amount <= zeroCents` in `mkTransferPair` / `insertTransfer`, bound `mkYearMonth` to `1900..9999`, bound `splitEvenly`, trim and cap names/payees (`<= 120` chars, no control chars) in `Domain.Validation`, and validate `BUCKTRACKER_PORT` (`1..65535`) + `nonempty` `BUCKTRACKER_DB_PATH` in `Config.hs`.
+- [ ] *(Note: `TransferAmountMustBePositive` in `mkTransferPair`/`insertTransfer`/`updateTransfer`, `[1900, 2200]` year bounds in `mkYearMonth`/`parseIsoDate`, and trimmed/length-bounded `nonEmptyName`/`validatePayee` already landed in `9ae5492`!)* Complete remaining items: bound `splitEvenly`, and validate `BUCKTRACKER_PORT` (`1..65535`) + non-empty `BUCKTRACKER_DB_PATH` in `Config.hs`.
 - [ ] Add `migrations/0002_import_index_and_constraints.sql` creating:
   - `CREATE UNIQUE INDEX idx_transactions_account_import_hash ON transactions (account_id, import_hash) WHERE import_hash IS NOT NULL;` (scoped per account so importing statements across multiple accounts never collides, while guaranteeing DB-level idempotency per account!).
   - Index on `assignments (year, month)`.
