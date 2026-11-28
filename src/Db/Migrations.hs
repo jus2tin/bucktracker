@@ -26,12 +26,12 @@ import Database.SQLite.Simple
   , execute
   , execute_
   , query_
-  , withTransaction
   )
 import qualified Database.SQLite3 as Raw
 import System.Directory (listDirectory)
 import System.FilePath (takeExtension, (</>))
 
+import Db.Tx (withImmediateTransaction)
 import Paths_bucktracker (getDataDir)
 
 -- | Creates the @schema_migrations@ table if needed, then applies every
@@ -88,7 +88,7 @@ instance Exception InvalidMigrationEncoding
 -- using the system locale encoding — wrong, and not even consistent
 -- across machines).
 applyMigration :: Connection -> FilePath -> FilePath -> IO ()
-applyMigration conn migrationsDir fileName = withTransaction conn $ do
+applyMigration conn migrationsDir fileName = withImmediateTransaction conn $ do
   bytes <- BS.readFile (migrationsDir </> fileName)
   sql <- either (const (throwIO (InvalidMigrationEncoding fileName))) pure (decodeUtf8' bytes)
   Raw.exec (connectionHandle conn) sql

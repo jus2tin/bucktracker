@@ -9,6 +9,7 @@ module Api.Accounts
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Database.SQLite.Simple (Connection)
 import GHC.Generics (Generic)
 import Lucid
 import Lucid.Base (makeAttribute)
@@ -32,6 +33,7 @@ import Api.Monad (AppM, withConn)
 import Api.Money (centsToEuroText, parseSignedEuros)
 import qualified Db.Account as Db
 import qualified Db.Transaction as Db
+import Db.Tx (withReadSnapshot)
 import Domain.Account (Account (accId, accName, accType), isArchived)
 import Domain.Budget (accountBalance, clearedBalance)
 import Domain.Error (DomainError (EmptyName))
@@ -78,18 +80,21 @@ accountsServer =
     :<|> unarchiveAccountHandler
     :<|> reconcileAccountHandler
 
+-- | Exactly one pool checkout per request (Track B §1.4): 'renderFragment'
+-- folds its own several reads into one 'withReadSnapshot' on the single
+-- 'Connection' 'withConn' borrows here.
 listAccountsHandler :: AppM (Html ())
-listAccountsHandler = renderFragment Nothing Nothing Nothing
+listAccountsHandler = withConn $ \conn -> renderFragment conn Nothing Nothing Nothing
 
 createAccountHandler :: Maybe Text -> NewAccountForm -> AppM (Html ())
-createAccountHandler hx form = case accountTypeFromText (accountType form) of
-  Nothing -> withError hx "Unknown account type."
+createAccountHandler hx form = withConn $ \conn -> case accountTypeFromText (accountType form) of
+  Nothing -> withError conn hx "Unknown account type."
   Just ty -> do
-    result <- withConn (\conn -> Db.insertAccount conn (name form) ty)
+    result <- Db.insertAccount conn (name form) ty
     case result of
-      Left (EmptyName _) -> withError hx "Name must not be empty."
-      Left _ -> withError hx "Could not create account."
-      Right _ -> renderFragment hx Nothing Nothing
+      Left (EmptyName _) -> withError conn hx "Name must not be empty."
+      Left _ -> withError conn hx "Could not create account."
+      Right _ -> renderFragment conn hx Nothing Nothing
 
 -- | Blocks archiving an account that still has a non-zero balance, or
 -- that still has any not-yet-'Reconciled' transaction even at a zero
@@ -100,22 +105,22 @@ createAccountHandler hx form = case accountTypeFromText (accountType form) of
 -- (not an error) on an unknown id, consistent with every other
 -- archive/unarchive handler.
 archiveAccountHandler :: Maybe Text -> Int64 -> AppM (Html ())
-archiveAccountHandler hx rawId = do
+archiveAccountHandler hx rawId = withConn $ \conn -> do
   let aid = AccountId rawId
-  txs <- withConn (\conn -> Db.listTransactionsForAccount conn aid)
+  txs <- Db.listTransactionsForAccount conn aid
   if accountBalance aid txs /= zeroCents
-    then withError hx "Cannot archive an account with a non-zero balance."
+    then withError conn hx "Cannot archive an account with a non-zero balance."
     else
       if any ((/= Reconciled) . txStatus) txs
-        then withError hx "Cannot archive an account with unreconciled transactions."
+        then withError conn hx "Cannot archive an account with unreconciled transactions."
         else do
-          withConn (\conn -> Db.archiveAccount conn aid)
-          renderFragment hx Nothing Nothing
+          Db.archiveAccount conn aid
+          renderFragment conn hx Nothing Nothing
 
 unarchiveAccountHandler :: Maybe Text -> Int64 -> AppM (Html ())
-unarchiveAccountHandler hx rawId = do
-  withConn (\conn -> Db.unarchiveAccount conn (AccountId rawId))
-  renderFragment hx Nothing Nothing
+unarchiveAccountHandler hx rawId = withConn $ \conn -> do
+  Db.unarchiveAccount conn (AccountId rawId)
+  renderFragment conn hx Nothing Nothing
 
 -- | The reconciliation workflow (DECISIONS.md §4/§3): compares
 -- 'Domain.Budget.clearedBalance' (everything the register has marked
@@ -133,19 +138,20 @@ unarchiveAccountHandler hx rawId = do
 -- them and get silently marked Reconciled without ever having been
 -- compared against the statement.
 reconcileAccountHandler :: Maybe Text -> Int64 -> ReconcileForm -> AppM (Html ())
-reconcileAccountHandler hx rawId form = case parseSignedEuros (statementBalance form) of
-  Nothing -> withError hx "Invalid statement balance."
+reconcileAccountHandler hx rawId form = withConn $ \conn -> case parseSignedEuros (statementBalance form) of
+  Nothing -> withError conn hx "Invalid statement balance."
   Just stmt -> do
     let aid = AccountId rawId
-    accounts <- withConn Db.listAccounts
+    accounts <- Db.listAccounts conn
     if not (any ((== aid) . accId) accounts)
-      then withError hx "Unknown account."
+      then withError conn hx "Unknown account."
       else do
-        result <- withConn (\conn -> Db.reconcileAccountIfMatches conn aid stmt)
+        result <- Db.reconcileAccountIfMatches conn aid stmt
         case result of
-          Right () -> renderFragment hx Nothing (Just "Account reconciled.")
+          Right () -> renderFragment conn hx Nothing (Just "Account reconciled.")
           Left cleared ->
             withError
+              conn
               hx
               ( "Doesn't match: your cleared transactions add up to "
                   <> centsToEuroText cleared
@@ -154,18 +160,22 @@ reconcileAccountHandler hx rawId form = case parseSignedEuros (statementBalance 
                   <> ". Nothing was changed — check for a missing, duplicate, or uncleared transaction."
               )
 
-withError :: Maybe Text -> Text -> AppM (Html ())
-withError hx msg = renderFragment hx (Just msg) Nothing
+withError :: Connection -> Maybe Text -> Text -> IO (Html ())
+withError conn hx msg = renderFragment conn hx (Just msg) Nothing
 
--- | Every mutating handler renders back through this. A plain
--- (non-HTMX) request gets a full page back — the progressive-
--- enhancement fallback for when HTMX didn't load — an HTMX request
--- gets just the @#accounts-content@ fragment it's about to swap in
--- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'.
-renderFragment :: Maybe Text -> Maybe Text -> Maybe Text -> AppM (Html ())
-renderFragment hx err successMsg = do
-  accounts <- withConn Db.listAccounts
-  txs <- withConn Db.listAllTransactions
+-- | Every handler renders back through this, on the one 'Connection'
+-- it was already given. A plain (non-HTMX) request gets a full page
+-- back — the progressive-enhancement fallback for when HTMX didn't
+-- load — an HTMX request gets just the @#accounts-content@ fragment
+-- it's about to swap in (hx-swap="outerHTML"); see
+-- 'Api.Html.pageOrFragment'. Both reads share one 'withReadSnapshot'
+-- (Track B §1.4), so the balance/status figures and the full
+-- transaction list can never be a mismatched pair from two different
+-- points in time.
+renderFragment :: Connection -> Maybe Text -> Maybe Text -> Maybe Text -> IO (Html ())
+renderFragment conn hx err successMsg = withReadSnapshot conn $ do
+  accounts <- Db.listAccounts conn
+  txs <- Db.listAllTransactions conn
   pure (pageOrFragment hx "Accounts" (accountsContent err successMsg accounts txs))
 
 accountsContent :: Maybe Text -> Maybe Text -> [Account] -> [Transaction] -> Html ()

@@ -52,6 +52,7 @@ Bucktracker uses an explicit two-model workflow: **Claude (Developer)** writes a
 - **Linter/Formatter (if needed):** `hlint src/ app/ test/` and `ormolu --mode inplace src/`.
 - **Targeted reads:** Use `offset`/`limit` line ranges on large modules rather than re-reading whole files repeatedly.
 - **Concise status updates:** Keep chat responses brief and factual (what changed, test count/status, commit hash, and any architectural change Carbon should reflect in `ARCHITECTURE.md`).
+- **Git commits vs. merges/pushes:** Commit your completed steps atomically on the active branch, then stop — Carbon handles post-commit audit, doc sync, merging into `main`, branch cleanup, and `git push` after Product Owner sign-off (unless a prompt explicitly asks you to push).
 - **Fresh sessions per Track:** `/compact` or start a fresh session at Track boundaries.
 
 ## Domain Rules (Bucktracker)

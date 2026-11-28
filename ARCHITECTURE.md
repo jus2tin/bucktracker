@@ -38,8 +38,19 @@ and `Db/`; it glues them together for one HTTP request and otherwise
 does as little as possible itself.
 
 There's a fourth, much smaller piece: `app/Main.hs` wires up config,
-opens the connection pool, and starts the Warp web server. It's the
-only place that "boots" anything.
+opens the SQLite connection pool inside `Control.Exception.bracket`
+(`Db.Pool.createPool` / `closePool`), and starts the Warp web server
+bound strictly to `127.0.0.1`. `Db.Pool` configures a single-stripe pool
+of at most 4 connections (`busy_timeout = 5000` first on every
+connection, `journal_mode = WAL` + `wal_autocheckpoint = 1000` +
+migrations run once on pool creation, and `PRAGMA wal_checkpoint(TRUNCATE)`
+run on `closePool` so clean exits fold `.db-wal` back into the main DB
+file). Every HTTP handler in `src/Api/*` checks out **one** `Connection`
+per request (`Api.Monad.withConn`), running multi-statement writes and
+read-then-write checks through `Db.Tx.withImmediateTransaction` (`BEGIN
+IMMEDIATE`, avoiding `BEGIN DEFERRED` lock-upgrade `SQLITE_BUSY`
+failures) and multi-table page renders through `Db.Tx.withReadSnapshot`
+(`BEGIN DEFERRED` consistent WAL snapshots).
 
 ## Static assets
 
@@ -111,19 +122,20 @@ Transactions page fills in the spending form and clicks submit.
    exist and are not archived. Anything wrong here short-circuits
    straight to an error message — the database is never touched.
 
-4. **The Db layer does the real write.** The handler calls
-   `Db.insertSpending` (`src/Db/Transaction.hs`), which runs inside one
-   SQLite transaction: it builds a `Domain.Transaction.TransactionLine`
-   and assembles a real `Transaction` via
-   `Domain.Transaction.mkSpendingTransaction`, checks the account is
-   on-budget (rejecting with the `DomainError`
-   `CategorizedTransactionRequiresOnBudgetAccount` if not — see
-   "Illegal states, unrepresentable" below), and only then runs the
-   `INSERT`s into `transactions` and `transaction_lines`.
+4. **The Db layer does the real write.** Using the single `Connection`
+   borrowed by the handler's top-level `Api.Monad.withConn`, the handler
+   calls `Db.insertSpending` (`src/Db/Transaction.hs`), which checks the
+   account is on-budget (rejecting with the `DomainError`
+   `CategorizedTransactionRequiresOnBudgetAccount` if not — see "Illegal
+   states, unrepresentable" below) and runs the `INSERT`s into
+   `transactions` and `transaction_lines` atomically inside
+   `Db.Tx.withImmediateTransaction` (`BEGIN IMMEDIATE`).
 
-5. **Success re-renders, fragment or full page.** `renderFragment`
-   re-reads the current month's accounts/categories/transactions
-   straight back out of `Db.*` and builds the updated
+5. **Success re-renders, fragment or full page.** On that same borrowed
+   `Connection`, `renderFragment` opens a consistent point-in-time WAL
+   snapshot (`Db.Tx.withReadSnapshot`), re-reads the current month's
+   accounts/categories/transactions straight back out of `Db.*`, and
+   builds the updated
    `#transactions-content` `Html ()` value with ordinary Lucid
    combinators (`table_`, `tr_`, `td_`, …) — there's no diffing or
    templating language, it's just Haskell building a tree of HTML. It
@@ -520,7 +532,7 @@ sides:
 | Add recurring obligations, subscriptions, or sinking-fund auto-funding (`/recurring`, Track E — see `DECISIONS.md` §13 & `docs/phases/track-e-recurring-spec.md`) | Planned after Tracks B–D: `recurring_rules` targets natural budget categories (`Entertainment`, `Sport`, `Housing`) with an orthogonal `is_fixed_obligation` flag, `1/3` quarterly and `1/12` annual integer-cent sinking-fund accruals, `Funded`/`Paid`/`Due` status on `/recurring`, and an idempotent one-click *"Fund Recurring"* action writing standard `assignments` rows |
 | Change a validation rule (e.g. a name's or payee's max length) | `src/Domain/Validation.hs` (`nonEmptyName` — trimmed, `<= 80` chars, no control chars; `validatePayee` — trimmed, `<= 160` chars, no control chars) |
 | Add a new kind of domain error | `src/Domain/Error.hs` (`DomainError`); whichever `Domain`/`Db` function should raise it; the `Api` handler's `case result of Left ... -> ...` that turns it into an on-page message |
-| Change the SQLite pragmas, pool size, or backup behavior | `src/Db/Pool.hs` (pragmas, pool size); `src/Db/Backup.hs` (the online backup) |
+| Change SQLite pragmas, transaction locking, pool size, or backup behavior | `src/Db/Pool.hs` (`openConfigured` pragma order, single-stripe `createPool` max 4 conns, `closePool` WAL `TRUNCATE` checkpoint); `src/Db/Tx.hs` (`withImmediateTransaction` `BEGIN IMMEDIATE` writes, `withReadSnapshot` consistent WAL reads); `app/Main.hs` (`bracket` pool lifecycle); `src/Db/Backup.hs` (the online backup) |
 | Change an env var, its default, or the port | `src/Config.hs`; then update `CLAUDE.md`'s "Config" line and `README.md` |
 | Change how euros are parsed/formatted on a page | `src/Api/Money.hs` — `parseSignedEuros`/`parseNonZeroSignedEuros`/`parsePositiveEuros`/`centsToEuroText`, shared by every `Api.*` module (DECISIONS.md §12, Architect review S-2). All euro fields now go through one of these three; which one encodes that field's legal range (e.g. a reconcile statement balance or a budget assignment can be negative or zero via `parseSignedEuros`, a split line/inflow can be negative but never exactly zero via `parseNonZeroSignedEuros`, a transfer must be strictly positive via `parsePositiveEuros`) |
 | Add or remove a split line, or change how many a transaction can have | `src/Api/Transactions.hs` — `NewSpendingForm`'s `FromForm` instance (`lookupAll "lineCategoryId"`/`"lineAmount"`) collects however many `lineCategoryId`/`lineAmount` pairs the form submits (`withValidSpending` rejects unequal counts); `parseSplitLines` parses them; nothing caps the count server-side. Client-side add/remove rows: `static/app.js`'s `splitEditor` Alpine component |

@@ -51,6 +51,7 @@ library
       Db.Migrations
       Db.Pool
       Db.Transaction
+      Db.Tx
       Domain
       Domain.Account
       Domain.Budget
@@ -143,6 +144,7 @@ test-suite bucktracker-test
       Db.PoolSpec
       Db.Setup
       Db.TransactionSpec
+      Db.TxSpec
       Domain.AccountSpec
       Domain.BudgetSpec
       Domain.CategorySpec

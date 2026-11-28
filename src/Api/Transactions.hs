@@ -61,6 +61,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
 import Data.Time (Day, fromGregorianValid)
+import Database.SQLite.Simple (Connection)
 import GHC.Generics (Generic)
 import Lucid
 import Lucid.Base (makeAttribute)
@@ -85,6 +86,7 @@ import Api.Money (centsToEuroText, parseNonZeroSignedEuros, parsePositiveEuros)
 import qualified Db.Account as Db
 import qualified Db.Category as Db
 import qualified Db.Transaction as Db
+import Db.Tx (withReadSnapshot)
 import Domain.Account (Account (accId, accName), isArchived, isOnBudget)
 import Domain.Category (Category (catId, catName), isArchivedCategory)
 import Domain.Error (DomainError (..))
@@ -181,11 +183,15 @@ transactionsServer =
     :<|> editSpendingHandler
     :<|> editTransferHandler
 
+-- | Exactly one pool checkout per request (Track B §1.4): resolving
+-- @?month=@/@?account=@ touches no database at all, and 'renderFragment'
+-- folds its own several reads into one 'withReadSnapshot' on the single
+-- 'Connection' 'withConn' borrows here.
 listTransactionsHandler :: Maybe Text -> Maybe Text -> AppM (Html ())
-listTransactionsHandler monthParam accountParam = do
+listTransactionsHandler monthParam accountParam = withConn $ \conn -> do
   ym <- resolveViewedMonth monthParam
   let accountFilter = accountParam >>= parseAccountFilterText
-  renderFragment Nothing ym accountFilter Nothing
+  renderFragment conn Nothing ym accountFilter Nothing
 
 -- | @""@ (an absent @?account=@, or the hidden "clear filter" link's
 -- empty value) means "no filter" — a bad id is treated the same way,
@@ -203,42 +209,46 @@ parseAccountFilterText t
 -- 'Db.updateInflow', and in whether archived accounts are rejected (see
 -- the module header).
 withValidInflow
-  :: Maybe Text -> NewInflowForm -> ([Account] -> AccountId -> Day -> Text -> Cents -> AppM (Html ())) -> AppM (Html ())
-withValidInflow hx form go = case parseAccountId (inflowAccountId form) of
-  Nothing -> withError hx "Unknown account."
+  :: Connection
+  -> Maybe Text
+  -> NewInflowForm
+  -> ([Account] -> AccountId -> Day -> Text -> Cents -> IO (Html ()))
+  -> IO (Html ())
+withValidInflow conn hx form go = case parseAccountId (inflowAccountId form) of
+  Nothing -> withError conn hx "Unknown account."
   Just aid -> case parseIsoDate (inflowDate form) of
-    Nothing -> withError hx "Invalid date."
+    Nothing -> withError conn hx "Invalid date."
     Just day -> case parseNonZeroSignedEuros (inflowAmount form) of
-      Nothing -> withError hx "Invalid amount."
+      Nothing -> withError conn hx "Invalid amount."
       Just amt -> case validatePayee (inflowPayee form) of
-        Left _ -> withError hx "Invalid payee."
+        Left _ -> withError conn hx "Invalid payee."
         Right payee -> do
-          accounts <- withConn Db.listAccounts
+          accounts <- Db.listAccounts conn
           if not (any ((== aid) . accId) accounts)
-            then withError hx "Unknown account."
+            then withError conn hx "Unknown account."
             else go accounts aid day payee amt
 
 createInflowHandler :: Maybe Text -> NewInflowForm -> AppM (Html ())
-createInflowHandler hx form = withValidInflow hx form $ \accounts aid day payee amt ->
+createInflowHandler hx form = withConn $ \conn -> withValidInflow conn hx form $ \accounts aid day payee amt ->
   case find ((== aid) . accId) accounts of
-    Just acc | isArchived acc -> withError hx "Cannot add a transaction to an archived account."
+    Just acc | isArchived acc -> withError conn hx "Cannot add a transaction to an archived account."
     _ -> do
-      _ <- withConn (\conn -> Db.insertInflow conn aid day payee defaultStatus amt Nothing)
-      renderDefault hx
+      _ <- Db.insertInflow conn aid day payee defaultStatus amt Nothing
+      renderDefault conn hx
 
 editInflowHandler :: Maybe Text -> Int64 -> NewInflowForm -> AppM (Html ())
-editInflowHandler hx rawId form = withValidInflow hx form $ \accounts aid day payee amt -> do
+editInflowHandler hx rawId form = withConn $ \conn -> withValidInflow conn hx form $ \accounts aid day payee amt -> do
   let txId' = TransactionId rawId
-  existing <- withConn (\conn -> Db.getTransaction conn txId')
+  existing <- Db.getTransaction conn txId'
   if maybe False (movesOntoArchivedAccount accounts aid) existing
-    then withError hx "Cannot move a transaction onto an archived account."
+    then withError conn hx "Cannot move a transaction onto an archived account."
     else do
-      result <- withConn (\conn -> Db.updateInflow conn txId' aid day payee amt)
+      result <- Db.updateInflow conn txId' aid day payee amt
       case result of
-        Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
-        Left TransactionKindMismatch -> withError hx "This is no longer that kind of transaction; refresh and try again."
-        Left _ -> withError hx "Could not update transaction."
-        Right _ -> renderDefault hx
+        Left CannotModifyReconciledTransaction -> withError conn hx "Cannot edit a reconciled transaction."
+        Left TransactionKindMismatch -> withError conn hx "This is no longer that kind of transaction; refresh and try again."
+        Left _ -> withError conn hx "Could not update transaction."
+        Right _ -> renderDefault conn hx
 
 -- | True when @aid@ differs from @existing@'s current account and is
 -- itself archived (AUDIT-03.3): an edit form always keeps showing a
@@ -255,68 +265,69 @@ movesOntoArchivedAccount accounts aid existing =
 -- 'editSpendingHandler', which otherwise differ as described in the
 -- module header.
 withValidSpending
-  :: Maybe Text
+  :: Connection
+  -> Maybe Text
   -> NewSpendingForm
-  -> ([Account] -> [Category] -> AccountId -> Day -> Text -> NonEmpty TransactionLine -> AppM (Html ()))
-  -> AppM (Html ())
-withValidSpending hx form go = case parseAccountId (spendingAccountId form) of
-  Nothing -> withError hx "Unknown account."
+  -> ([Account] -> [Category] -> AccountId -> Day -> Text -> NonEmpty TransactionLine -> IO (Html ()))
+  -> IO (Html ())
+withValidSpending conn hx form go = case parseAccountId (spendingAccountId form) of
+  Nothing -> withError conn hx "Unknown account."
   Just aid -> case parseIsoDate (spendingDate form) of
-    Nothing -> withError hx "Invalid date."
+    Nothing -> withError conn hx "Invalid date."
     -- AUDIT-03.4: a crafted POST submitting unequal numbers of
     -- lineCategoryId/lineAmount fields would otherwise have 'zip'
     -- silently drop whichever trailing fields don't pair up.
     Just _day | length (spendingLineCategoryIds form) /= length (spendingLineAmounts form) ->
-      withError hx "Mismatched category/amount fields."
+      withError conn hx "Mismatched category/amount fields."
     Just day ->
       case parseSplitLines (zip (spendingLineCategoryIds form) (spendingLineAmounts form)) of
-        Left err -> withError hx err
-        Right [] -> withError hx "A split needs at least one line."
+        Left err -> withError conn hx err
+        Right [] -> withError conn hx "A split needs at least one line."
         Right (line1 : restLines) -> case validatePayee (spendingPayee form) of
-          Left _ -> withError hx "Invalid payee."
+          Left _ -> withError conn hx "Invalid payee."
           Right payee -> do
             let lines' = line1 :| restLines
-            accounts <- withConn Db.listAccounts
-            categories <- withConn Db.listCategories
+            accounts <- Db.listAccounts conn
+            categories <- Db.listCategories conn
             if not (any ((== aid) . accId) accounts)
-              then withError hx "Unknown account."
+              then withError conn hx "Unknown account."
               else
                 if not (all (\l -> any ((== tlCategory l) . catId) categories) (toList lines'))
-                  then withError hx "Unknown category."
+                  then withError conn hx "Unknown category."
                   else go accounts categories aid day payee lines'
 
 createSpendingHandler :: Maybe Text -> NewSpendingForm -> AppM (Html ())
-createSpendingHandler hx form = withValidSpending hx form $ \accounts categories aid day payee lines' ->
+createSpendingHandler hx form = withConn $ \conn -> withValidSpending conn hx form $ \accounts categories aid day payee lines' ->
   case find ((== aid) . accId) accounts of
-    Just acc | isArchived acc -> withError hx "Cannot add a transaction to an archived account."
+    Just acc | isArchived acc -> withError conn hx "Cannot add a transaction to an archived account."
     _
       | any (isArchivedLine categories) (toList lines') ->
-          withError hx "Cannot categorize a transaction against an archived category."
+          withError conn hx "Cannot categorize a transaction against an archived category."
       | otherwise -> do
-          result <- withConn (\conn -> Db.insertSpending conn aid day payee defaultStatus lines' Nothing)
+          result <- Db.insertSpending conn aid day payee defaultStatus lines' Nothing
           case result of
             Left CategorizedTransactionRequiresOnBudgetAccount ->
-              withError hx "Categorized transactions are not allowed on tracking accounts."
-            Left _ -> withError hx "Could not create transaction."
-            Right _ -> renderDefault hx
+              withError conn hx "Categorized transactions are not allowed on tracking accounts."
+            Left _ -> withError conn hx "Could not create transaction."
+            Right _ -> renderDefault conn hx
 
 editSpendingHandler :: Maybe Text -> Int64 -> NewSpendingForm -> AppM (Html ())
-editSpendingHandler hx rawId form = withValidSpending hx form $ \accounts categories aid day payee lines' -> do
+editSpendingHandler hx rawId form = withConn $ \conn -> withValidSpending conn hx form $ \accounts categories aid day payee lines' -> do
   let txId' = TransactionId rawId
-  existing <- withConn (\conn -> Db.getTransaction conn txId')
+  existing <- Db.getTransaction conn txId'
   if maybe False (movesOntoArchivedAccount accounts aid) existing
-    then withError hx "Cannot move a transaction onto an archived account."
+    then withError conn hx "Cannot move a transaction onto an archived account."
     else if maybe False (movesOntoArchivedCategory categories lines') existing
-      then withError hx "Cannot categorize a transaction against a newly chosen archived category."
+      then withError conn hx "Cannot categorize a transaction against a newly chosen archived category."
       else do
-        result <- withConn (\conn -> Db.updateSpending conn txId' aid day payee lines')
+        result <- Db.updateSpending conn txId' aid day payee lines'
         case result of
           Left CategorizedTransactionRequiresOnBudgetAccount ->
-            withError hx "Categorized transactions are not allowed on tracking accounts."
-          Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
-          Left TransactionKindMismatch -> withError hx "This is no longer that kind of transaction; refresh and try again."
-          Left _ -> withError hx "Could not update transaction."
-          Right _ -> renderDefault hx
+            withError conn hx "Categorized transactions are not allowed on tracking accounts."
+          Left CannotModifyReconciledTransaction -> withError conn hx "Cannot edit a reconciled transaction."
+          Left TransactionKindMismatch -> withError conn hx "This is no longer that kind of transaction; refresh and try again."
+          Left _ -> withError conn hx "Could not update transaction."
+          Right _ -> renderDefault conn hx
 
 -- | Same reasoning as 'movesOntoArchivedAccount' (AUDIT-03.3), but for
 -- each split line's category: a line keeping one of the transaction's
@@ -343,53 +354,54 @@ isArchivedLine categories l = maybe False isArchivedCategory (find ((== tlCatego
 -- (along with the accounts just fetched to validate them) to @go@ —
 -- shared by 'createTransferHandler' and 'editTransferHandler'.
 withValidTransfer
-  :: Maybe Text
+  :: Connection
+  -> Maybe Text
   -> NewTransferForm
-  -> ([Account] -> AccountId -> AccountId -> Day -> Cents -> AppM (Html ()))
-  -> AppM (Html ())
-withValidTransfer hx form go = case parseAccountId (transferFromAccountId form) of
-  Nothing -> withError hx "Unknown account."
+  -> ([Account] -> AccountId -> AccountId -> Day -> Cents -> IO (Html ()))
+  -> IO (Html ())
+withValidTransfer conn hx form go = case parseAccountId (transferFromAccountId form) of
+  Nothing -> withError conn hx "Unknown account."
   Just fromAid -> case parseAccountId (transferToAccountId form) of
-    Nothing -> withError hx "Unknown account."
+    Nothing -> withError conn hx "Unknown account."
     Just toAid -> case parseIsoDate (transferDate form) of
-      Nothing -> withError hx "Invalid date."
+      Nothing -> withError conn hx "Invalid date."
       Just day -> case parsePositiveEuros (transferAmount form) of
-        Nothing -> withError hx "Invalid amount."
+        Nothing -> withError conn hx "Invalid amount."
         Just amt -> do
-          accounts <- withConn Db.listAccounts
+          accounts <- Db.listAccounts conn
           if not (all (`elem` map accId accounts) [fromAid, toAid])
-            then withError hx "Unknown account."
+            then withError conn hx "Unknown account."
             else go accounts fromAid toAid day amt
 
 createTransferHandler :: Maybe Text -> NewTransferForm -> AppM (Html ())
-createTransferHandler hx form = withValidTransfer hx form $ \accounts fromAid toAid day amt ->
+createTransferHandler hx form = withConn $ \conn -> withValidTransfer conn hx form $ \accounts fromAid toAid day amt ->
   if any (\acc -> accId acc `elem` [fromAid, toAid] && isArchived acc) accounts
-    then withError hx "Cannot add a transaction to an archived account."
+    then withError conn hx "Cannot add a transaction to an archived account."
     else do
-      result <- withConn (\conn -> Db.insertTransfer conn (fromAid, toAid) day defaultStatus amt)
+      result <- Db.insertTransfer conn (fromAid, toAid) day defaultStatus amt
       case result of
-        Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
+        Left TransferRequiresDistinctAccounts -> withError conn hx "A transfer needs two different accounts."
         Left TransferRequiresMatchingBudgetStatus ->
-          withError hx "Cannot transfer between an on-budget and a tracking account."
-        Left _ -> withError hx "Could not create transfer."
-        Right _ -> renderDefault hx
+          withError conn hx "Cannot transfer between an on-budget and a tracking account."
+        Left _ -> withError conn hx "Could not create transfer."
+        Right _ -> renderDefault conn hx
 
 editTransferHandler :: Maybe Text -> Int64 -> NewTransferForm -> AppM (Html ())
-editTransferHandler hx rawId form = withValidTransfer hx form $ \accounts fromAid toAid day amt -> do
+editTransferHandler hx rawId form = withConn $ \conn -> withValidTransfer conn hx form $ \accounts fromAid toAid day amt -> do
   let txId' = TransactionId rawId
-  existing <- withConn (\conn -> Db.getTransaction conn txId')
+  existing <- Db.getTransaction conn txId'
   if maybe False (movesOntoArchivedTransferAccount accounts fromAid toAid) existing
-    then withError hx "Cannot move a transfer onto an archived account."
+    then withError conn hx "Cannot move a transfer onto an archived account."
     else do
-      result <- withConn (\conn -> Db.updateTransfer conn txId' (fromAid, toAid) day amt)
+      result <- Db.updateTransfer conn txId' (fromAid, toAid) day amt
       case result of
-        Left TransferRequiresDistinctAccounts -> withError hx "A transfer needs two different accounts."
+        Left TransferRequiresDistinctAccounts -> withError conn hx "A transfer needs two different accounts."
         Left TransferRequiresMatchingBudgetStatus ->
-          withError hx "Cannot transfer between an on-budget and a tracking account."
-        Left CannotModifyReconciledTransaction -> withError hx "Cannot edit a reconciled transaction."
-        Left TransactionKindMismatch -> withError hx "This is no longer that kind of transaction; refresh and try again."
-        Left _ -> withError hx "Could not update transfer."
-        Right _ -> renderDefault hx
+          withError conn hx "Cannot transfer between an on-budget and a tracking account."
+        Left CannotModifyReconciledTransaction -> withError conn hx "Cannot edit a reconciled transaction."
+        Left TransactionKindMismatch -> withError conn hx "This is no longer that kind of transaction; refresh and try again."
+        Left _ -> withError conn hx "Could not update transfer."
+        Right _ -> renderDefault conn hx
 
 -- | Same reasoning as 'movesOntoArchivedAccount' (AUDIT-03.3), but for
 -- a transfer's two accounts: either side keeping one of the transfer's
@@ -410,9 +422,9 @@ movesOntoArchivedTransferAccount accounts fromAid toAid existing = case txCatego
 -- unknown id or an already-Reconciled transaction
 -- (Domain.Types.toggleCleared).
 toggleClearedHandler :: Maybe Text -> Int64 -> AppM (Html ())
-toggleClearedHandler hx rawId = do
-  withConn (\conn -> Db.setTransactionCleared conn (TransactionId rawId))
-  renderDefault hx
+toggleClearedHandler hx rawId = withConn $ \conn -> do
+  Db.setTransactionCleared conn (TransactionId rawId)
+  renderDefault conn hx
 
 -- | Deletes a transaction (both legs, for a transfer) via
 -- 'Db.deleteTransaction'. Blocked server-side on an already-'Reconciled'
@@ -420,12 +432,12 @@ toggleClearedHandler hx rawId = do
 -- (see 'deleteButton'), so this is defense in depth, not the only
 -- guard.
 deleteTransactionHandler :: Maybe Text -> Int64 -> AppM (Html ())
-deleteTransactionHandler hx rawId = do
-  result <- withConn (\conn -> Db.deleteTransaction conn (TransactionId rawId))
+deleteTransactionHandler hx rawId = withConn $ \conn -> do
+  result <- Db.deleteTransaction conn (TransactionId rawId)
   case result of
-    Left CannotModifyReconciledTransaction -> withError hx "Cannot delete a reconciled transaction."
-    Left _ -> withError hx "Could not delete transaction."
-    Right () -> renderDefault hx
+    Left CannotModifyReconciledTransaction -> withError conn hx "Cannot delete a reconciled transaction."
+    Left _ -> withError conn hx "Could not delete transaction."
+    Right () -> renderDefault conn hx
 
 defaultStatus :: TransactionStatus
 defaultStatus = Uncleared
@@ -433,31 +445,35 @@ defaultStatus = Uncleared
 -- | Every mutating handler's error path. Always re-renders the default
 -- view (today's month, no account filter) — see the module header for
 -- why a mutation doesn't thread the viewed month/filter back through.
-withError :: Maybe Text -> Text -> AppM (Html ())
-withError hx msg = do
+withError :: Connection -> Maybe Text -> Text -> IO (Html ())
+withError conn hx msg = do
   today <- localToday
-  renderFragment hx (dayToYearMonth today) Nothing (Just msg)
+  renderFragment conn hx (dayToYearMonth today) Nothing (Just msg)
 
 -- | Every mutating handler's success path — see 'withError'.
-renderDefault :: Maybe Text -> AppM (Html ())
-renderDefault hx = do
+renderDefault :: Connection -> Maybe Text -> IO (Html ())
+renderDefault conn hx = do
   today <- localToday
-  renderFragment hx (dayToYearMonth today) Nothing Nothing
+  renderFragment conn hx (dayToYearMonth today) Nothing Nothing
 
 -- | The one place that actually renders the register, for both a
 -- freshly-viewed @?month=@/@?account=@ (via 'listTransactionsHandler')
--- and a mutation's default-view re-render ('withError'/'renderDefault').
--- A plain (non-HTMX) request gets a full page back — the progressive-
+-- and a mutation's default-view re-render ('withError'/'renderDefault'),
+-- always on the one 'Connection' the request already borrowed. A plain
+-- (non-HTMX) request gets a full page back — the progressive-
 -- enhancement fallback for when HTMX didn't load — an HTMX request
 -- gets just the @#transactions-content@ fragment it's about to swap in
--- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'.
-renderFragment :: Maybe Text -> YearMonth -> Maybe AccountId -> Maybe Text -> AppM (Html ())
-renderFragment hx ym accountFilter err = do
+-- (hx-swap="outerHTML"); see 'Api.Html.pageOrFragment'. The several
+-- reads below share one 'withReadSnapshot' (Track B §1.4), so the
+-- register, its account/category pickers, and the account filter can
+-- never disagree with each other from two different points in time.
+renderFragment :: Connection -> Maybe Text -> YearMonth -> Maybe AccountId -> Maybe Text -> IO (Html ())
+renderFragment conn hx ym accountFilter err = withReadSnapshot conn $ do
   today <- localToday
-  transactionsInMonth <- withConn (\conn -> Db.listTransactionsInMonth conn ym)
+  transactionsInMonth <- Db.listTransactionsInMonth conn ym
   let transactions = maybe transactionsInMonth (\aid -> filter ((== aid) . txAccount) transactionsInMonth) accountFilter
-  accounts <- withConn Db.listAccounts
-  categories <- withConn Db.listCategories
+  accounts <- Db.listAccounts conn
+  categories <- Db.listCategories conn
   pure
     ( pageOrFragment
         hx

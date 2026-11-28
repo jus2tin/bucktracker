@@ -31,10 +31,10 @@ import Database.SQLite.Simple
   , lastInsertRowId
   , query
   , query_
-  , withTransaction
   )
 import Db.Account (getAccount)
 import Db.Field ()
+import Db.Tx (withImmediateTransaction)
 import Domain.Account (Account, isOnBudget, sameBudgetStatus)
 import Domain.Budget (clearedBalance)
 import Domain.Error (DomainError (..))
@@ -192,13 +192,13 @@ insertSpending conn accId day payee status lines' importHash = do
   acc <- requireAccount conn accId
   if not (isOnBudget acc)
     then pure (Left CategorizedTransactionRequiresOnBudgetAccount)
-    else Right <$> withTransaction conn (insertSpendingRows conn accId day payee status lines' importHash)
+    else Right <$> withImmediateTransaction conn (insertSpendingRows conn accId day payee status lines' importHash)
 
 -- | No validation of its own — the raw helper behind both
 -- 'insertSpending' and 'updateSpending' (see "$editing"). Must already
--- be running inside a 'withTransaction': inserting the parent row and
--- every line is two-or-more statements that should never be left
--- half-done.
+-- be running inside a 'withImmediateTransaction' (Track B §1.3):
+-- inserting the parent row and every line is two-or-more statements
+-- that should never be left half-done.
 insertSpendingRows
   :: Connection
   -> AccountId
@@ -247,14 +247,14 @@ insertTransfer conn (fromAccId, toAccId) day status amount
       toAcc <- requireAccount conn toAccId
       if not (sameBudgetStatus fromAcc toAcc)
         then pure (Left TransferRequiresMatchingBudgetStatus)
-        else Right <$> withTransaction conn (insertTransferRows conn (fromAccId, toAccId) day (status, status) amount)
+        else Right <$> withImmediateTransaction conn (insertTransferRows conn (fromAccId, toAccId) day (status, status) amount)
 
 -- | No validation of its own — the raw helper behind both
 -- 'insertTransfer' and 'updateTransfer' (see "$editing"). Must already
--- be running inside a 'withTransaction': the two legs and the shared
--- @transfers@ row are three statements that should never be left
--- half-done. Takes the "from" and "to" legs' statuses *separately*
--- (AUDIT-02): a fresh 'insertTransfer' passes the same status for both,
+-- be running inside a 'withImmediateTransaction' (Track B §1.3): the
+-- two legs and the shared @transfers@ row are three statements that
+-- should never be left half-done. Takes the "from" and "to" legs'
+-- statuses *separately* (AUDIT-02): a fresh 'insertTransfer' passes the same status for both,
 -- but 'updateTransfer' must be able to preserve each existing leg's own
 -- independent status instead of clobbering one with the other's.
 insertTransferRows
@@ -376,7 +376,7 @@ listAllTransactions conn = do
 -- 'reconcileAccount', not something a single click on one row should
 -- be able to undo.
 setTransactionCleared :: Connection -> TransactionId -> IO ()
-setTransactionCleared conn txId' = withTransaction conn $ do
+setTransactionCleared conn txId' = withImmediateTransaction conn $ do
   rows <- query conn "SELECT status FROM transactions WHERE id = ?" (Only txId') :: IO [Only TransactionStatus]
   case rows of
     [Only current] ->
@@ -407,7 +407,7 @@ reconcileAccount conn aid =
 -- cleared balance back, for the "doesn't match" message; 'Right ()'
 -- means the write happened.
 reconcileAccountIfMatches :: Connection -> AccountId -> Cents -> IO (Either Cents ())
-reconcileAccountIfMatches conn aid statementBalance = withTransaction conn $ do
+reconcileAccountIfMatches conn aid statementBalance = withImmediateTransaction conn $ do
   txs <- listTransactionsForAccount conn aid
   let cleared = clearedBalance aid txs
   if cleared == statementBalance
@@ -491,7 +491,7 @@ withReplaceable
   -> (Transaction -> [Transaction] -> Either DomainError ())
   -> (Transaction -> [Transaction] -> Connection -> IO (Either DomainError a))
   -> IO (Either DomainError (Maybe a))
-withReplaceable conn txId' precheck replaceWith = withTransaction conn $ do
+withReplaceable conn txId' precheck replaceWith = withImmediateTransaction conn $ do
   maybeTx <- getTransaction conn txId'
   case maybeTx of
     Nothing -> pure (Right Nothing)
